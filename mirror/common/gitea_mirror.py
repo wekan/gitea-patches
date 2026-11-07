@@ -18,6 +18,9 @@ WHAT IS COPIED, AND HOW IT STAYS IN STEP
             GitHub, URL is the GitHub address of the issue, exactly what WeKan's mirror
             used. Only what is missing is added; nothing at the destination is removed.
   releases  each release that is missing, its notes, and every file it lacks.
+  avatars   the avatar of each Gitea organization or user onto its destination, and a
+            repository's avatar onto the repository there - uploaded again only when
+            the image changes.
 
 STATE AND RESUME
   <name>-state.json remembers which destination item each source item became, when each
@@ -45,10 +48,11 @@ import urllib.parse
 import urllib.request
 import uuid
 
-STEPS = ["git", "issues", "releases"]
+STEPS = ["git", "issues", "releases", "avatars"]
 STEP_NAMES = {"git": "git branches and tags, and the wiki (pushed without force)",
               "issues": "issues and pull requests with comments, labels, milestones",
-              "releases": "releases, their notes and files"}
+              "releases": "releases, their notes and files",
+              "avatars": "avatars of organizations, users and repositories"}
 SPECIAL = {"(all)": None, "(allpublic)": False, "(allprivate)": True}
 SPECIAL_NAMES = {"(all)": "every private and public repository the Gitea token can read",
                  "(allpublic)": "every public repository the Gitea token can read",
@@ -374,6 +378,19 @@ class Item:
 MARKER = re.compile(r"<!-- wekan-mirror:(\S+?) -->")
 
 
+def image_extension(data):
+    """The file extension of an image by its first bytes: GitLab checks an avatar's
+    type by its file name."""
+    for magic, ext in ((b"\x89PNG", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF8", ".gif")):
+        if data.startswith(magic):
+            return ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.lstrip()[:5] in (b"<?xml", b"<svg ") or b"<svg" in data[:300]:
+        return ".svg"
+    return ".png"
+
+
 def marker_of(text):
     m = MARKER.search(text or "")
     return m.group(1) if m else ""
@@ -475,6 +492,8 @@ class Engine:
             self.sync_issues(repo, handle, state)
         if "releases" in steps:
             self.sync_releases(repo, handle)
+        if "avatars" in steps:
+            self.sync_avatars(repo, handle)
 
     # git
     def work_repo(self, repo, wiki=False):
@@ -690,6 +709,61 @@ class Engine:
         if asset.get("size") and os.path.getsize(path) != asset["size"]:
             raise RuntimeError(f"download of {asset['name']} is incomplete")
         return path
+
+    # avatars
+    AVATAR_MAX = 10 * 1048576
+
+    def fetch_avatar(self, url):
+        req = urllib.request.Request(url, headers=dict(self.gitea.headers(), **{"User-Agent": "gitea-mirror"}))
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read(self.AVATAR_MAX + 1)
+        if len(data) > self.AVATAR_MAX:
+            raise RuntimeError("larger than 10 MB")
+        return data
+
+    def sync_avatars(self, repo, handle):
+        owner = repo["owner"]["login"]
+        seen = self.__dict__.setdefault("_avatar_owners", set())
+        if owner not in seen:
+            seen.add(owner)
+            url = (repo.get("owner") or {}).get("avatar_url")
+            if url:
+                dest = self.destination(owner)
+                self.put_avatar(f"owner:{owner}", url, f"avatar of {owner}",
+                                lambda path: self.t.owner_avatar(dest, path))
+        if repo.get("avatar_url"):
+            self.put_avatar(f"repo:{repo['full_name']}", repo["avatar_url"], f"avatar of {repo['full_name']}",
+                            lambda path: self.t.repo_avatar(handle, repo, path))
+
+    def put_avatar(self, key, url, what, upload):
+        """Download a Gitea avatar and upload it with upload(path) - only when it is not
+        the image uploaded last time. upload returns False when the target cannot."""
+        try:
+            data = self.fetch_avatar(self.gitea.base + url[len(self.gitea.public):] if url.startswith(self.gitea.public) and self.gitea.public != self.gitea.base else url)
+        except (urllib.error.URLError, OSError, RuntimeError) as e:
+            self.record("failed", f"{what}: {e}")
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        done = self.state.setdefault("_avatars", {})
+        if done.get(key) == digest:
+            return
+        if self.dry:
+            self.record("planned", what)
+            return
+        d = os.path.join(self.here, "work", "tmp", uuid.uuid4().hex)
+        os.makedirs(d)
+        try:
+            path = os.path.join(d, "avatar" + image_extension(data))
+            with open(path, "wb") as f:
+                f.write(data)
+            if upload(path):
+                done[key] = digest
+                self.save_state()
+                self.record("copied", what)
+        except (RuntimeError, OSError) as e:
+            self.record("failed", f"{what}: {e}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     # a run over the sources, resumable
     def run(self, steps, only=None):

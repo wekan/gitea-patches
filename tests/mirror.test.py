@@ -306,6 +306,45 @@ e.run(["git"], "wekan")
 check("resume: the interrupted run continues with the repository it stopped at", calls == ["wekan/wekan"])
 gm.Engine.run_repo = orig
 
+# --- avatars ------------------------------------------------------------------------------------
+fake.repos["wekan/wekan"]["owner"]["avatar_url"] = f"{GITEA}/avatars/org-wekan"
+fake.repos["wekan/wekan"]["avatar_url"] = f"{GITEA}/repo-avatars/wekan"
+images = {f"{GITEA}/avatars/org-wekan": b"\x89PNG-org", f"{GITEA}/repo-avatars/wekan": b"GIF8-repo"}
+e.fetch_avatar = lambda url: images[url]
+puts = []
+orig_gitlab = fake.gitlab
+
+
+def gitlab_with_avatars(method, path, q, j, body):
+    if path == "/groups/wekan" and method == "GET":
+        return 200, {"id": 5}, {}
+    if method == "PUT" and path in ("/groups/5", "/projects/9") and body is not None:
+        puts.append((path, os.path.basename(body.f.name)))
+        return 200, {}, {}
+    return orig_gitlab(method, path, q, j, body)
+
+
+fake.gitlab = gitlab_with_avatars
+e.counts = {}
+e.run(["avatars"], "wekan/wekan")
+check("avatars: the organization's onto its GitLab group, the repository's onto its project",
+      sorted(puts) == [("/groups/5", "avatar.png"), ("/projects/9", "avatar.gif")])
+puts.clear()
+e.__dict__.pop("_avatar_owners", None)
+e.run(["avatars"], "wekan/wekan")
+check("avatars: the same images are not uploaded again", puts == [])
+images[f"{GITEA}/avatars/org-wekan"] = b"\xff\xd8\xffnew"
+e.__dict__.pop("_avatar_owners", None)
+e.cfg.set("options", "dry_run", "yes")
+e.run(["avatars"], "wekan/wekan")
+check("negative: a dry run uploads no avatar", puts == [])
+e.cfg.set("options", "dry_run", "no")
+e.__dict__.pop("_avatar_owners", None)
+e.run(["avatars"], "wekan/wekan")
+check("avatars: a changed image is uploaded, as .jpg", puts == [("/groups/5", "avatar.jpg")])
+check("image_extension", [gm.image_extension(x) for x in (b"\x89PNGx", b"GIF89a", b"RIFF1234WEBPx", b"<svg xmlns")] == [".png", ".gif", ".webp", ".svg"])
+fake.gitlab = orig_gitlab
+
 # --- git: pushed, never forced --------------------------------------------------------------
 def git(*a, cwd=None):
     return subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout
@@ -430,6 +469,10 @@ scripts.clear()
 s.restart = True
 s.run(["issues", "releases"], "wekan/wekan")
 check("SourceForge: idempotent, a second run writes nothing", not fsf.writes and not [x for x in scripts if "put " in x])
+s.counts = {}
+s.counts = {}
+s.t.owner_avatar("wekan", "/x.png"); s.t.repo_avatar({"project": "wekan"}, {}, "/x.png")
+check("SourceForge: avatars are reported once as not possible, not failed", s.counts == {"skipped": 1})
 s.counts = {}
 check("negative: SourceForge refuses a private repository", s.t.ensure_repo("wekan", fsf.repos["wekan/secret"]) is None
       and s.counts.get("skipped") == 1)

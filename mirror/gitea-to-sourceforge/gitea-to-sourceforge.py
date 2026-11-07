@@ -302,6 +302,17 @@ class SourceForge:
     def upload_file(self, target, r, name, path):
         self.put(target, r, name, path)
 
+    # avatars: SourceForge's REST API has no project icon - it is set in the project's
+    # admin pages - so they are reported, once per run, not copied.
+    def owner_avatar(self, dest, path):
+        if not getattr(self, "_icon_reported", False):
+            self._icon_reported = True
+            self.e.record("skipped", "avatars: SourceForge has no API for project icons; set the icon in the project's admin")
+        return False
+
+    def repo_avatar(self, handle, repo, path):
+        return self.owner_avatar(handle["project"], path)
+
     # checks
     def check_online(self, e):
         out = []

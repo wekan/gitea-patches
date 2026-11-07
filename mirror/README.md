@@ -20,6 +20,12 @@ cd mirror/gitea-to-gitlab
 ./gitea-to-gitlab.py --all            # every configured step for every source (cron)
 ```
 
+github-to-gitea's step `avatars` copies each GitHub organization's or user's avatar
+onto its Gitea organization (or the token's own Gitea user - Gitea's API sets no
+other user's), and a repository's custom social preview image - GitHub's only
+repository picture - as its Gitea avatar. Every tool uploads an avatar again only
+when the image changes.
+
 ## Sources
 
 | Source | What is mirrored |
@@ -44,6 +50,7 @@ the menu's **Destinations** - by default the same name as its Gitea owner.
 | files attached in Gitea | uploaded to the GitLab project | links to the Gitea public address |
 | releases | releases, files in the generic package registry | `<files_dir>[/<repository>]/<tag>/` in the project's Files, notes as README.md |
 | private repositories | private projects (`private = no` skips them) | not mirrored: SourceForge projects are public |
+| avatars (step `avatars`) | organization or user -> GitLab group (or the token's own user); repository -> project avatar | not possible: SourceForge's API has no project icon; reported once per run |
 
 A missing GitLab project is created, in a group that must exist. A SourceForge project
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools

@@ -305,6 +305,24 @@ class GitLab:
         self.ok("POST", f"/projects/{target['pid']}/releases/{enc(r['tag_name'])}/assets/links",
                 {"name": name, "url": self.api + where, "link_type": "package"})
 
+    # avatars
+    def owner_avatar(self, dest, path):
+        """A group's avatar; for a user namespace, only the token's own user can be set."""
+        status, group, _ = self.call("GET", f"/groups/{enc(dest)}")
+        if status == 200:
+            self.ok("PUT", f"/groups/{group['id']}", body=gm.FileBody(path, "avatar"))
+            return True
+        status, me, _ = self.call("GET", "/user")
+        if status == 200 and me.get("username", "").lower() == dest.lower():
+            self.ok("PUT", "/user/avatar", body=gm.FileBody(path, "avatar"))
+            return True
+        self.e.record("skipped", f"avatar of {dest}: a GitLab user other than the token's own; GitLab's API cannot set it")
+        return False
+
+    def repo_avatar(self, handle, repo, path):
+        self.ok("PUT", f"/projects/{handle['id']}", body=gm.FileBody(path, "avatar"))
+        return True
+
     # checks
     def check_online(self, e):
         out = []

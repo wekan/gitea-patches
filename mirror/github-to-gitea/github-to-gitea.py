@@ -40,11 +40,17 @@ STEPS
             setting release_assets (none / local / github).
   actions   .github/workflows -> branch actions_branch (main + .gitea/workflows + .gitea/gh).
             See the menu item "Help: Gitea Actions".
+  avatars   the avatar of each GitHub organization or user onto its Gitea organization
+            (or the token's own Gitea user), and a repository's custom social preview
+            image - GitHub's only repository picture - as its Gitea avatar. An image is
+            uploaded again only when it changes.
 """
 
 import argparse
+import base64
 import configparser
 import datetime
+import hashlib
 import json
 import mimetypes
 import shutil
@@ -63,12 +69,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INI_FILE = os.path.join(HERE, "github-to-gitea.ini")
 STATE_FILE = os.path.join(HERE, "github-to-gitea-state.json")
 SHIM_FILE = os.path.join(HERE, "github-to-gitea-gh.py")
-STEPS = ["migrate", "git", "issues", "releases", "actions"]
+STEPS = ["migrate", "git", "issues", "releases", "actions", "avatars"]
+# The default steps before "avatars" was added: a settings file still saying this gets it.
+OLD_DEFAULT_STEPS = "migrate, git, issues, releases, actions"
 STEP_NAMES = {"migrate": "migration (repository, issues, PRs, comments, labels, milestones, wiki)",
               "git": "git fetch into the bare repository (branches, tags, PR refs)",
               "issues": "new issues/PRs and changes to existing ones",
               "releases": "releases (and their files, when release_assets is not none)",
-              "actions": "GitHub Actions -> Gitea Actions (branch actions_branch)"}
+              "actions": "GitHub Actions -> Gitea Actions (branch actions_branch)",
+              "avatars": "avatars of organizations, users and repositories"}
 
 # Every setting, its default and its meaning: this is also what the menu shows.
 SETTINGS = [
@@ -330,6 +339,9 @@ def load_config():
         if not CFG.has_option(s, k):
             CFG.set(s, k, d)
             added = True
+    if CFG.get("options", "steps", fallback="").strip() == OLD_DEFAULT_STEPS:
+        CFG.set("options", "steps", ", ".join(STEPS))
+        added = True
     if added:
         save_config()  # every setting visible in the file, with its default
 
@@ -1100,6 +1112,88 @@ def convert_local(src, dst):
                 open(os.path.join(dst, ".gitea", "workflows", name), "w", encoding="utf-8").write(conv)
 
 
+# --- 6. avatars ------------------------------------------------------------------
+
+AVATAR_MAX = 10 * 1048576
+_owner_avatars = set()
+
+
+def fetch_image(url):
+    """An avatar or preview image from GitHub (no token: they are public)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "github-to-gitea"})
+    with NO_AUTH_REDIRECT.open(req, timeout=120) as r:
+        data = r.read(AVATAR_MAX + 1)
+    if len(data) > AVATAR_MAX:
+        raise ValueError("larger than 10 MB")
+    return data
+
+
+def put_avatar(path, data, what):
+    """The image to a Gitea avatar endpoint - unless this same image already went there,
+    so a run uploads only avatars that changed."""
+    digest = hashlib.sha256(data).hexdigest()
+    done = STORE.setdefault("_avatars", {})
+    if done.get(path) == digest:
+        return
+    if DRY:
+        log("    [dry-run] avatar {what}".format(what=what))
+        return
+    s, d = gitea("POST", path, {"image": base64.b64encode(data).decode()})
+    if s in (200, 204):
+        done[path] = digest
+        save_state()
+        log("  {what}: avatar copied".format(what=what))
+    else:
+        log("  {what}: avatar not copied: {s} {d}".format(what=what, s=s, d=d))
+
+
+def sync_owner_avatar(owner):
+    """The GitHub organization's or user's avatar onto the Gitea organization of the
+    same name - or onto the token's own Gitea user: Gitea's API sets no other user's."""
+    if owner in _owner_avatars:
+        return
+    _owner_avatars.add(owner)
+    try:
+        url = gh(f"users/{owner}").get("avatar_url")
+    except LookupError as e:
+        log("  {what}: avatar not downloaded: {e}".format(what=owner, e=e))
+        return
+    if not url:
+        return
+    if gitea("GET", f"/orgs/{owner}")[0] == 200:
+        path = f"/orgs/{owner}/avatar"
+    else:
+        s, me = gitea("GET", "/user")
+        if s != 200 or (me or {}).get("login", "").lower() != owner.lower():
+            log("  {owner}: a Gitea user other than the token's own - Gitea's API sets only the token user's avatar; skipped".format(owner=owner))
+            return
+        path = "/user/avatar"
+    try:
+        data = fetch_image(url)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        log("  {what}: avatar not downloaded: {e}".format(what=owner, e=e))
+        return
+    put_avatar(path, data, owner)
+
+
+def sync_repo_avatar():
+    """A repository's custom social preview image - GitHub's only repository picture,
+    in its GraphQL API only - as the Gitea repository's avatar."""
+    owner, name = GITHUB_REPO.split("/", 1)
+    q = "query($o:String!,$n:String!){repository(owner:$o,name:$n){usesCustomOpenGraphImage openGraphImageUrl}}"
+    s, d = http("POST", "https://api.github.com/graphql", os.environ["GITHUB_TOKEN"],
+                body={"query": q, "variables": {"o": owner, "n": name}})
+    repo = ((d or {}).get("data") or {}).get("repository") if s == 200 and isinstance(d, dict) else None
+    if not repo or not repo.get("usesCustomOpenGraphImage") or not repo.get("openGraphImageUrl"):
+        return
+    try:
+        data = fetch_image(repo["openGraphImageUrl"])
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        log("  {what}: avatar not downloaded: {e}".format(what=GITHUB_REPO, e=e))
+        return
+    put_avatar(f"/repos/{OWNER}/{NAME}/avatar", data, GITHUB_REPO)
+
+
 # --- main --------------------------------------------------------------------
 
 # --- sources ------------------------------------------------------------------
@@ -1215,6 +1309,9 @@ def run_repo(full, steps):
         sync_releases()
     if "actions" in steps:
         sync_actions(state)
+    if "avatars" in steps:
+        sync_owner_avatar(OWNER)
+        sync_repo_avatar()
 
 
 RESTART = False
