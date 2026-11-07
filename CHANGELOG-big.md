@@ -85,6 +85,24 @@ a string whose `%`-verbs or HTML tags differ from the English.
 
 </details>
 
+and fixes the following bugs:
+
+**Mirroring** - github-to-gitea's errors in a run of 942 repositories.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/2ab04878bb0213573de51d5c28514f4719e45303">Create organizations whose GitHub website has no https://, and fix two false failures</a>. Thanks to xet7.</summary>
+
+EthKan's organization was refused (`422 [Website]: Url`) because its GitHub
+website is `ethkan.io`: it now gets `https://`, and the organization is
+created without a website when Gitea still refuses it. `wekan/ldap` was
+reported as wrongly imported because GitHub moved its issue #2 to #69; a moved
+number is now skipped by the numbering check, as the issue sync already did.
+`xet7/Rumble`, whose history has a submodule URL Gitea's git fsck refuses, no
+longer waits for a second attempt that fails the same way, and the error says
+what to add to Gitea's `app.ini` to accept it.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
