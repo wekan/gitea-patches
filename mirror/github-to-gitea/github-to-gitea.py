@@ -419,6 +419,10 @@ def numbering_matches(name):
             g = gh(f"repos/{GITHUB_REPO}/issues/{num}")
         except LookupError:
             continue
+        if g.get("number") != num:
+            # GitHub moved this number (wekan/ldap: #2 answers as #69): it no longer exists
+            # on GitHub, and Gitea rightly does not have it. It says nothing about numbering.
+            continue
         s, t = gitea("GET", f"/issues/{num}", repo=f"{OWNER}/{name}")
         if s != 200 or t["title"] != g["title"] or ("pull_request" in g) != bool(t.get("pull_request")):
             log(f"  #{num}: Gitea '{(t or {}).get('title') if s == 200 else s}' ≠ GitHub '{g['title']}'")
@@ -483,6 +487,14 @@ def migrate_into(name):
         log(f"Migration failed: {reason}")
         if repo_exists(name):
             remove_leftover(name)
+        fsck = re.search(r"object [0-9a-f]{40}: (\w+): ", reason)
+        if fsck:
+            # Gitea's git checks every object it fetches (transfer.fsckObjects), and this
+            # history has one it refuses: another attempt ends the same way.
+            fail(f"git fsck refused this repository's history ({fsck.group(1)}). GitHub accepts it; "
+                 f"to accept it in Gitea too, add to Gitea's app.ini and restart Gitea:\n"
+                 f"    [git.config]\n    fetch.fsck.{fsck.group(1)} = ignore\n"
+                 f"  and run this again. The original error: {reason}")
         if attempt == 1:
             log("  Trying the migration once more in 60 s ({n}/2)...".format(n=2))
             time.sleep(60)
@@ -1139,6 +1151,16 @@ def expand_source(src):
         raise RepoError(f"{src}: {e}")
 
 
+def website(blog):
+    """GitHub's blog field as a Gitea website. Gitea accepts only a full URL, and GitHub
+    often has it without https:// (EthKan: "ethkan.io"); anything else is left out."""
+    blog = (blog or "").strip()
+    if blog and not re.match(r"^https?://", blog, re.I):
+        blog = "https://" + blog
+    host = urllib.parse.urlsplit(blog).hostname or ""
+    return blog if "." in host and " " not in blog else ""
+
+
 def ensure_owner(owner):
     """The Gitea owner: an existing organization or user of that name, otherwise a new
     organization (never a new user) - also when the GitHub owner is a user, such as xet7."""
@@ -1150,9 +1172,14 @@ def ensure_owner(owner):
     except LookupError:
         info = {}
     log(f"Creating the Gitea organization {owner}")
-    s, d = gitea("POST", "/orgs", {"username": owner, "full_name": info.get("name") or "",
-                                   "description": info.get("bio") or info.get("description") or "",
-                                   "website": info.get("blog") or "", "visibility": "public"})
+    org = {"username": owner, "full_name": (info.get("name") or "")[:100],
+           "description": (info.get("bio") or info.get("description") or "")[:255],
+           "website": website(info.get("blog")), "visibility": "public"}
+    s, d = gitea("POST", "/orgs", org)
+    if s == 422 and org["website"]:
+        # Gitea did not accept the address: the organization is made without it.
+        org["website"] = ""
+        s, d = gitea("POST", "/orgs", org)
     if s not in (200, 201) and not DRY:
         raise RepoError(f"could not create the organization {owner}: {s} {d}")
     _owners.add(owner)
