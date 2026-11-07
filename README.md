@@ -60,6 +60,14 @@ the local Gitea on to GitLab (`gitea-to-gitlab`) and SourceForge
 releases with their files - with the same menu, and in step with WeKan's
 `releases/mirror.sh`.
 
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) is the upcoming release and the five newest, in short.
+[CHANGELOG-big.md](CHANGELOG-big.md) is the changelog that is written - every entry
+in full - and CHANGELOG.md is generated from it with
+`python3 releases/changelog-short.py`, never edited by hand: the same two files, and
+the same rules, as WeKan's CHANGELOG-big.md and CHANGELOG.md.
+
 ## Tests
 
 ```sh
@@ -67,6 +75,7 @@ python3 -I tests/translations.test.py   # the translation merge rules
 bash tests/apply-patches.sh             # clone + commits, against a local fixture
 bash tests/source-zips.sh               # the zips: contents, names, reproducibility
 python3 -I tests/mirror.test.py         # mirror/: Gitea -> GitLab and SourceForge
+python3 -I tests/changelogShort.test.py # CHANGELOG.md is what CHANGELOG-big.md gives
 ```
 
 None of them needs the network.
