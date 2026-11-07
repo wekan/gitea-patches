@@ -103,6 +103,16 @@ what to add to Gitea's `app.ini` to accept it.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/7449010cf4730754545a8c8971c0d8cac7b3721b">A draft pull request's WIP: title prefix is not a wrong import</a>. Thanks to xet7.</summary>
+
+`riscv/riscv-attached-matrix-extension` was reported as wrongly imported
+because Gitea prefixes an imported draft pull request's title with `WIP:`.
+Titles are now compared without Gitea's `WIP:` and `[WIP]` prefixes, in the
+numbering check and in the issue sync, which would otherwise have undrafted it.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
