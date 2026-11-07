@@ -402,6 +402,17 @@ def repo_exists(name):
     return status == 200
 
 
+WIP_PREFIX = re.compile(r"^\s*(?:WIP:|\[WIP\])\s*", re.I)
+
+
+def same_title(gitea_title, github_title):
+    """Gitea's title and GitHub's as the same: Gitea prefixes a draft pull request's
+    title with its work-in-progress marker (WORK_IN_PROGRESS_PREFIXES, by default "WIP:"
+    and "[WIP]") when it imports it - riscv/riscv-attached-matrix-extension #2 is
+    "WIP: Switch Zvame to Ztt" in Gitea. Removing the prefix would undraft it."""
+    return gitea_title == github_title or WIP_PREFIX.sub("", gitea_title) == github_title
+
+
 def numbering_matches(name):
     """Do Gitea's numbers match GitHub's? A few numbers from across the range are checked."""
     status, data = gitea("GET", "/issues?state=all&limit=1", repo=f"{OWNER}/{name}")
@@ -424,7 +435,7 @@ def numbering_matches(name):
             # on GitHub, and Gitea rightly does not have it. It says nothing about numbering.
             continue
         s, t = gitea("GET", f"/issues/{num}", repo=f"{OWNER}/{name}")
-        if s != 200 or t["title"] != g["title"] or ("pull_request" in g) != bool(t.get("pull_request")):
+        if s != 200 or not same_title(t["title"], g["title"]) or ("pull_request" in g) != bool(t.get("pull_request")):
             log(f"  #{num}: Gitea '{(t or {}).get('title') if s == 200 else s}' ≠ GitHub '{g['title']}'")
             return False
     return True
@@ -687,7 +698,7 @@ def sync_item(num, item, state, since):
                 log(f"  #{num}: marked as merged")
                 cur["state"] = "closed"
     patch = {}
-    if cur["title"] != item["title"]:
+    if not same_title(cur["title"], item["title"]):
         patch["title"] = item["title"]
     want_state = "closed" if item["state"] == "closed" else "open"
     if cur["state"] != want_state:
