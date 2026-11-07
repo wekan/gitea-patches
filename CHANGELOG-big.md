@@ -124,6 +124,20 @@ numbering check and in the issue sync, which would otherwise have undrafted it.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/3740b6ba40a98d4fc2c4be07126c688abb1d45fb">A new pull request's head commit reaches Gitea even when Gitea's bare repository is not on this machine</a>. Thanks to xet7.</summary>
+
+Run elsewhere than on Gitea's machine, the git step was skipped, and a new pull
+request whose head commit Gitea did not have stopped the repository ("PR #6879:
+head commit f4f4c7f2cb is missing from the Gitea repository"). That one commit
+is now fetched from GitHub's `refs/pull/<N>/head` and pushed to Gitea as branch
+`github-pr/<N>` - the branch the PR is made from anyway - after checking it is
+the commit GitHub's API names; nothing else is pushed, and the tokens never
+appear on a git command line. `tests/githubToGiteaPush.test.py` runs it against
+local repositories standing in for GitHub and Gitea.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
