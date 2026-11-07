@@ -19,7 +19,8 @@ the source as `gitea-patches-source-with-history.zip` and
 repository's changes applied as **git commits**, and released with its source as
 **two zips** - with and without git history - and binaries for **every platform
 upstream releases**, built from the zip without history. The web UI is
-**completely in Finnish**.
+**completely in Finnish**, and the local Gitea is **mirrored on to GitLab and
+SourceForge**.
 
 This release adds the following new features:
 
@@ -46,6 +47,24 @@ without history, the linux group gave all five binaries, and the Finnish
 locale embedded in the arm64 binary is byte-identical to the patched source.
 `tests/` cover the merge rules, the commits against a local fixture upstream,
 and the zips.
+
+</details>
+
+**Mirroring** - the local Gitea on to GitLab and SourceForge.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/c1678702012830f408cffe43d785468349a3bcf3">Mirror the local Gitea to GitLab and SourceForge, in step with WeKan's mirror</a>. Thanks to xet7.</summary>
+
+`mirror/gitea-to-gitlab` and `mirror/gitea-to-sourceforge` copy git branches and
+tags (never forced), the wiki, issues and pull requests with comments, labels,
+milestones and closed state, and releases with their files, with the menu of
+`github-to-gitea` and the read-only checks and run log of WeKan's
+`releases/mirror.sh`. Every copy carries WeKan's `<!-- wekan-mirror:URL -->`
+marker with the item's GitHub address when Gitea migrated it from GitHub, so
+nothing that mirror already copied is copied twice. GitLab release files go to
+the generic package registry; SourceForge uses WeKan's tool names and
+`GitHub-releases/` files. Rate limits are waited out, an interrupted run
+resumes, and `tests/mirror.test.py` runs both against fake forges.
 
 </details>
 
