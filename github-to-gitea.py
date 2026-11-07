@@ -1278,10 +1278,25 @@ def menu_settings():
             save_config()
 
 
+SOURCE_HELP = """\
+  A source is one of:
+    owner/name    one repository, e.g. wekan/wekan
+    org           every repository of a GitHub organization, e.g. wekan
+    user          every repository a GitHub user OWNS, e.g. xet7 (not the repositories of
+                  organizations it belongs to); private ones too when it is the token's user
+    (all)         every private and public repository the GitHub token can write to
+    (allpublic)   every public repository the GitHub token can write to
+    (allprivate)  every private repository the GitHub token can write to
+  Each repository goes to the Gitea organization or user named like its GitHub owner;
+  when Gitea has neither, an organization is created. Organizations and users the token
+  has no access to work too, for public repositories, but slower (60 requests an hour)."""
+
+
 def menu_sources():
     while True:
         items = sources()
         print("\nSources:")
+        print(SOURCE_HELP + "\n\n  Configured sources:")
         for i, s in enumerate(items, 1):
             what = SPECIAL_NAMES.get(s.lower()) or ("one repository" if "/" in s else
                                                     "organization or user: every repository it owns")
@@ -1293,10 +1308,6 @@ def menu_sources():
         if c in ("", "0"):
             return
         if c == "a":
-            print("  owner/name    one repository, e.g. wekan/wekan")
-            print("  owner         every repository of an organization or user, e.g. wekan or xet7")
-            for k, d in SPECIAL_NAMES.items():
-                print(f"  {k:13} every {d}")
             v = ask("GitHub repository, organization or user, or (all) / (allpublic) / (allprivate)").strip().strip("/")
             v = v.replace("https://github.com/", "").removesuffix(".git")
             if v.lower() in SPECIAL:
