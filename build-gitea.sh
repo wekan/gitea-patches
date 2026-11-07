@@ -1,7 +1,8 @@
 #!/bin/bash
-# Build Gitea from source in .tools/w/gitea (github.com/wekan/gitea), wherever
-# this script is started from.
-cd "$(dirname "$(readlink -f "$0")")/w/gitea" || { echo "ERROR: .tools/w/gitea not found" >&2; exit 1; }
+# Build Gitea for this computer from the patched source in ./gitea, which
+# `./build.sh source` makes (upstream + this repository's patches), wherever this
+# script is started from.
+cd "$(dirname "$(readlink -f "$0")")/gitea" || { echo "ERROR: ./gitea not found; run ./build.sh source first" >&2; exit 1; }
 
 rm -f gitea
 

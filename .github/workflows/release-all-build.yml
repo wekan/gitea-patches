@@ -1,0 +1,377 @@
+name: Release All build
+
+# Shared by "Release All" (release-all.yml) and "Release All Missing"
+# (release-all-missing.yml). It is called, never run by itself.
+#
+# This repository carries no Gitea source. Each run:
+#
+#   1. source   clones upstream go-gitea/gitea WITH its history, applies this
+#               repository's changes as git commits (releases/apply-patches.sh),
+#               and attaches to the release
+#                 gitea-patches-source-with-history.zip     gitea/ including gitea/.git
+#                 gitea-patches-source-without-history.zip  gitea/ without gitea/.git
+#               each with a .sha256 and a keyless cosign .sigstore.json.
+#   2. build    one job per group - linux, windows, darwin, freebsd, src - builds
+#               from the CONTENT OF gitea-patches-source-without-history.zip, so
+#               the binaries are made from exactly the source on the release, and
+#               attaches its files the moment they are done.
+#
+# WHAT IT BUILDS: what upstream's release-tag-version.yml puts on a go-gitea/gitea
+# release, the same way - `make deps-frontend deps-backend frontend`, then:
+#
+#   release-<os>      every platform of that OS in tools/build-release.sh's
+#                     RELEASE_PLATFORMS_DEFAULT (linux amd64, arm-5, arm-6, arm64,
+#                     riscv64; windows amd64, arm64; darwin amd64, arm64; freebsd
+#                     amd64 when this was written), Go's own cross compilation
+#   release-compress  an .xz beside each binary
+#   release-sources   gitea-src-<version>.tar.gz (group src)
+#   release-check     a .sha256 beside every file
+#
+# and a keyless cosign signature (<file>.sigstore.json) of every file, which needs
+# only this workflow's OIDC token. Upstream's GPG .asc files need upstream's
+# private key, so they are not made here. The platform list is read from the
+# source, so it follows upstream.
+#
+# VERSION: the Makefile names files after GITHUB_REF_NAME when GITHUB_REF_TYPE is
+# "tag", and `$(subst v,,...)` removes EVERY "v" in it - so a tag must have no "v"
+# after its first character. Without a tag input the tag is
+# v<upstream version>-wekan-<YYYYMMDD>-<upstream commit, 10 characters>.
+#
+# mode: all      build everything; files of the same name are replaced.
+#       missing  complete a release: rebuild only the groups it lacks a file of,
+#                from the source already on it, and upload only absent files.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'all or missing'
+        required: true
+        type: string
+      tag:
+        description: 'Release tag (empty = a new one for "all", the newest release for "missing")'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: 'Upstream go-gitea/gitea branch, tag or commit for "all" (empty = main)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  # gh works out which repository to talk to from the git remote of the working
+  # directory, and the working directory here is an UPSTREAM clone, whose origin
+  # is go-gitea/gitea. Every gh call names this repository instead.
+  GH_REPO: ${{ github.repository }}
+  WITH_HISTORY: gitea-patches-source-with-history.zip
+  WITHOUT_HISTORY: gitea-patches-source-without-history.zip
+
+jobs:
+  source:
+    name: ${{ inputs.mode == 'all' && 'upstream + patches -> source zips' || 'plan the missing files' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      groups: ${{ steps.plan.outputs.groups }}
+    steps:
+      - name: Check out the patches
+        uses: actions/checkout@v7
+        with:
+          path: _patches
+
+      - name: Find the release to complete
+        id: existing
+        if: ${{ inputs.mode == 'missing' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')"
+            [ -n "$TAG" ] || { echo "::error::There is no release yet. Run Release All first."; exit 1; }
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 || { echo "::error::There is no release $TAG."; exit 1; }
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > existing.txt
+          echo "$TAG carries $(wc -l < existing.txt | tr -d ' ') file(s)."
+          # The source already on the release is the source to build from, so a
+          # completed release is built from one source however many runs it took.
+          if grep -qxF "$WITH_HISTORY" existing.txt && grep -qxF "$WITHOUT_HISTORY" existing.txt; then
+            gh release download "$TAG" --pattern "$WITHOUT_HISTORY" --pattern "$WITHOUT_HISTORY.sha256"
+            sha256sum -c "$WITHOUT_HISTORY.sha256"
+            echo "source=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=rebuild" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Clone upstream Gitea and apply the patches as commits
+        if: ${{ inputs.mode == 'all' || steps.existing.outputs.source == 'rebuild' }}
+        env:
+          MODE: ${{ inputs.mode }}
+          REF: ${{ inputs.ref }}
+          TAG: ${{ steps.existing.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = missing ]; then
+            # The tag ends with the upstream commit it was built from, and the
+            # commits apply-patches.sh makes are reproducible, so this is the same
+            # source the release was made from (with today's patches).
+            REF="${TAG##*-}"
+            echo "The release has no source zips; rebuilding them from upstream $REF."
+          fi
+          bash _patches/releases/apply-patches.sh _patches gitea "$REF"
+
+      - name: Name the release
+        id: tag
+        env:
+          MODE: ${{ inputs.mode }}
+          TAG: ${{ inputs.mode == 'all' && inputs.tag || steps.existing.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            TAG="v${UPSTREAM_VERSION}-wekan-$(date -u +%Y%m%d)-${UPSTREAM_SHORT}"
+          fi
+          case "${TAG#v}" in
+            *v*) echo "::error::Tag $TAG has a \"v\" after the first character; the Makefile's \$(subst v,,...) would remove it from every file name."; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Release $TAG"
+
+      - name: Zip the source, with and without history
+        if: ${{ inputs.mode == 'all' || steps.existing.outputs.source == 'rebuild' }}
+        run: |
+          set -euo pipefail
+          git -C gitea remote set-url origin https://github.com/go-gitea/gitea.git
+          # Not `zip`: see source-zips.py.
+          python3 -I _patches/releases/source-zips.py gitea out
+          ( cd out && sha256sum -c *.sha256 )
+
+      - name: Use the source already on the release
+        if: ${{ steps.existing.outputs.source == 'release' }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          mv "$WITHOUT_HISTORY" "$WITHOUT_HISTORY.sha256" out/
+          unzip -q "out/$WITHOUT_HISTORY"
+
+      - name: Plan the groups to build
+        id: plan
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          [ -f existing.txt ] || : > existing.txt
+          # The files one release file brings: itself, its .sha256, and a
+          # .sigstore.json of each.
+          expect() { printf '%s\n' "$1" "$1.sha256" "$1.sigstore.json" "$1.sha256.sigstore.json"; }
+          PLATFORMS="$(sed -n '/^RELEASE_PLATFORMS_DEFAULT=(/,/^)/p' gitea/tools/build-release.sh | tr -d '()\\' | grep -oE '[a-z0-9]+/[a-z0-9-]+')"
+          [ -n "$PLATFORMS" ] || { echo "::error::No platforms found in tools/build-release.sh."; exit 1; }
+          groups=""
+          for group in linux windows darwin freebsd src; do
+            missing=0
+            if [ "$group" = src ]; then
+              files="$(expect "gitea-src-$VERSION.tar.gz")"
+            else
+              files=""
+              for p in $PLATFORMS; do
+                [ "${p%%/*}" = "$group" ] || continue
+                bin="gitea-$VERSION-${p//\//-}"; [ "$group" = windows ] && bin="$bin.exe"
+                files="$files"$'\n'"$(expect "$bin")"$'\n'"$(expect "$bin.xz")"
+              done
+            fi
+            for f in $files; do grep -qxF "$f" existing.txt || missing=$((missing + 1)); done
+            if [ "$MODE" = all ] || [ "$missing" -gt 0 ]; then
+              groups="$groups\"$group\","
+              echo "  $group: build ($missing file(s) missing)"
+            else
+              echo "  $group: complete"
+            fi
+          done
+          echo "groups=[${groups%,}]" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $TAG ($MODE)"
+            echo ""
+            echo "Groups to build: [${groups%,}]"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the source to the build jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: out/${{ env.WITHOUT_HISTORY }}
+          retention-days: 3
+          compression-level: 0
+
+      - name: Write the release notes
+        if: ${{ inputs.mode == 'all' || steps.existing.outputs.source == 'rebuild' }}
+        env:
+          SERVER: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Gitea 🍵 built from upstream [go-gitea/gitea](https://github.com/go-gitea/gitea) with the changes of [wekan/gitea-patches](${SERVER}/${GITHUB_REPOSITORY}) applied as git commits."
+            echo ""
+            echo "| Upstream ref | Upstream commit | Version | gitea-patches commit |"
+            echo "|---|---|---|---|"
+            echo "| \`${SOURCE_REF}\` | [\`${UPSTREAM_SHORT}\`](https://github.com/go-gitea/gitea/commit/${UPSTREAM_COMMIT}) | ${UPSTREAM_VERSION} | [\`${GITHUB_SHA::10}\`](${SERVER}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |"
+            echo ""
+            echo "Commits on top of upstream:"
+            echo ""
+            git -C gitea log --reverse --format='- %s' "${UPSTREAM_COMMIT}..HEAD"
+            echo ""
+            echo "Files:"
+            echo ""
+            echo "- \`${WITH_HISTORY}\` - the source as a git repository: \`gitea/\` with \`gitea/.git\`, upstream's history and the commits above on branch \`gitea-patches\`."
+            echo "- \`${WITHOUT_HISTORY}\` - the same source without \`gitea/.git\`, smaller. The binaries are built from it."
+            echo "- \`gitea-<version>-<os>-<arch>\` for every platform upstream releases, with an \`.xz\`, and \`gitea-src-<version>.tar.gz\`."
+            echo ""
+            echo "Every file has a \`.sha256\` and a keyless cosign signature \`.sigstore.json\` beside it."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$MODE" = all ] && [ -f release-notes.md ]; then
+              gh release edit "$TAG" --notes-file release-notes.md
+            fi
+            exit 0
+          fi
+          # A build of an upstream release tag is a release; anything else -
+          # main, a branch, a commit - is a prerelease.
+          pre="--prerelease"
+          [[ "${SOURCE_REF:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && pre=""
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" $pre --notes-file release-notes.md
+
+      - name: Install Cosign
+        if: ${{ inputs.mode == 'all' || steps.existing.outputs.source == 'rebuild' }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign and attach the source zips
+        if: ${{ inputs.mode == 'all' || steps.existing.outputs.source == 'rebuild' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          for f in out/*.zip out/*.zip.sha256; do
+            cosign sign-blob "$f" --bundle "$f.sigstore.json" --yes
+          done
+          shopt -s nullglob
+          files=( out/*.zip out/*.zip.sha256 out/*.sigstore.json )
+          if [ "$MODE" = all ]; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            new=()
+            for f in "${files[@]}"; do grep -qxF "$(basename "$f")" existing.txt || new+=( "$f" ); done
+            [ "${#new[@]}" -eq 0 ] || gh release upload "$TAG" "${new[@]}"
+          fi
+
+  build:
+    name: build ${{ matrix.group }}
+    needs: source
+    if: ${{ needs.source.outputs.groups != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.source.outputs.groups) }}
+    env:
+      TAG: ${{ needs.source.outputs.tag }}
+    steps:
+      - name: Get the source
+        uses: actions/download-artifact@v8
+        with:
+          name: source
+          path: ${{ runner.temp }}/source
+
+      # The source is unpacked at the workspace root, so it is an ordinary Gitea
+      # tree there: upstream's own actions (./.github/actions/node-setup) resolve,
+      # and release-sources' tarball holds nothing that is not Gitea.
+      - name: Unpack gitea-patches-source-without-history.zip
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          unzip -q "$WITHOUT_HISTORY"
+          shopt -s dotglob
+          mv gitea/* "$GITHUB_WORKSPACE"/
+          rmdir gitea
+          [ ! -e "$GITHUB_WORKSPACE/.git" ] || { echo "::error::The source without history has a .git."; exit 1; }
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - uses: ./.github/actions/node-setup
+
+      - name: Build
+        env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          make deps-frontend deps-backend
+          # Name files after the tag, as upstream's tag build does; with no .git,
+          # this is also where the version shown in Gitea comes from.
+          export GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$TAG"
+          if [ "$GROUP" = src ]; then
+            make frontend vendor release-sources release-check
+          else
+            make frontend "release-$GROUP" release-copy release-compress release-check
+          fi
+          ls -l dist/release
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign every file
+        run: |
+          set -euo pipefail
+          for f in dist/release/*; do
+            cosign sign-blob "$f" --bundle "$f.sigstore.json" --yes
+          done
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/release/* )
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::Nothing was built in dist/release."; exit 1; }
+          if [ "$MODE" = all ]; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+            echo "Attached ${#files[@]} file(s) to $TAG."
+            exit 0
+          fi
+          # missing: only absent files, so a group rebuilt for one file does not
+          # replace the bytes of the others.
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > existing.txt
+          new=()
+          for f in "${files[@]}"; do grep -qxF "$(basename "$f")" existing.txt || new+=( "$f" ); done
+          if [ "${#new[@]}" -eq 0 ]; then
+            echo "::notice::$TAG already had every file this group produced."
+            exit 0
+          fi
+          gh release upload "$TAG" "${new[@]}"
+          {
+            echo "Added ${#new[@]} file(s) for ${{ matrix.group }}:"
+            printf -- '- %s\n' "${new[@]#dist/release/}"
+          } >> "$GITHUB_STEP_SUMMARY"

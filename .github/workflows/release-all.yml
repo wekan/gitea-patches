@@ -1,0 +1,47 @@
+name: Release All
+
+# Clone upstream go-gitea/gitea, apply this repository's patches and translations
+# as git commits, and publish on a GitHub Release of this repository:
+#
+#   gitea-patches-source-with-history.zip     the patched source with gitea/.git
+#   gitea-patches-source-without-history.zip  the same without gitea/.git, smaller
+#   gitea-<version>-<os>-<arch>[.exe] and .xz for every platform upstream
+#   releases, built from the zip without history, and gitea-src-<version>.tar.gz
+#
+# each with a .sha256 and a keyless cosign .sigstore.json. Files of the same name
+# are replaced. The build is in release-all-build.yml.
+#
+# Usage:
+#   gh workflow run release-all.yml                         # upstream main
+#   gh workflow run release-all.yml -f ref=v1.25.3          # an upstream release
+#   gh workflow run release-all.yml -f tag=v29.0.0-wekan-20261107-4f69599981
+#
+# To fill in only what a release is missing, use release-all-missing.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream go-gitea/gitea branch, tag or commit (empty = main)'
+        required: false
+        type: string
+      tag:
+        description: 'Release tag, with no "v" after the first character (empty = v<upstream version>-wekan-<date>-<upstream commit>)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: gitea-release-${{ inputs.tag || inputs.ref || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-all-build.yml
+    with:
+      mode: all
+      tag: ${{ inputs.tag }}
+      ref: ${{ inputs.ref }}

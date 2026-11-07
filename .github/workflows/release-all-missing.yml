@@ -1,0 +1,35 @@
+name: Release All Missing
+
+# Complete a release: build only the groups (linux, windows, darwin, freebsd,
+# src) it lacks a file of - a binary, its .xz, a .sha256 or a signature - from
+# the gitea-patches-source-without-history.zip already on that release, and
+# upload only the absent files. Files already on the release are never replaced.
+# A release without its source zips gets them rebuilt from the upstream commit
+# its tag names. The build is in release-all-build.yml.
+#
+# Usage:
+#   gh workflow run release-all-missing.yml              # the newest release
+#   gh workflow run release-all-missing.yml -f tag=v29.0.0-wekan-20261107-4f69599981
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to complete (empty = the newest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: gitea-release-${{ inputs.tag || 'newest' }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-all-build.yml
+    with:
+      mode: missing
+      tag: ${{ inputs.tag }}
