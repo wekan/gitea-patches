@@ -9,3 +9,5 @@ mirror/gitea-to-*/*.ini.tmp
 mirror/gitea-to-*/*-state.json*
 mirror/gitea-to-*/log/
 mirror/gitea-to-*/work/
+# github-to-gitea: its git cache of pull request heads pushed to Gitea.
+mirror/github-to-gitea/tmp/

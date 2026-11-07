@@ -31,7 +31,9 @@ STEPS
             old -> <name>-old-YYYYMMDD (not deleted), new -> <name>.
   git       fetches GitHub's branches, tags and refs/pull/*/head into the bare repository
             (setting bare_repo) - a local git fetch, no push - so that the commits of new
-            pull requests are in Gitea.
+            pull requests are in Gitea. Without the bare repository on this machine, a new
+            pull request's head commit is fetched from GitHub into tmp/ beside the script
+            and pushed to Gitea as its branch github-pr/<N>, and nothing else is pushed.
   issues    new numbers in order (a pull request as a real one, from branch
             github-pr/<N>), and changes to existing ones: title, body, state, labels, new
             comments. If a pull request cannot be made a real one, the repository stops
@@ -659,16 +661,68 @@ def gitea_top():
     return d[0]["number"] if s == 200 and d else 0
 
 
+def git_auth_env(token):
+    """git's environment with the token as HTTP basic authentication - what git over
+    HTTPS takes on GitHub and on Gitea - from the environment, never on the command
+    line, where `ps` would show it."""
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="http.extraHeader", GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic}")
+
+
+def github_git_url():
+    return f"https://github.com/{GITHUB_REPO}.git"
+
+
+def gitea_git_url():
+    root = GITEA_URL[: -len("/api/v1")] if GITEA_URL.endswith("/api/v1") else GITEA_URL
+    return f"{root}/{OWNER}/{NAME}.git"
+
+
+def push_pr_head(num, sha, branch):
+    """Without Gitea's bare repository on this machine, the PR's head commit goes to
+    Gitea the other way: fetched from GitHub into a cache under .tools/tmp, and pushed
+    to Gitea as the branch github-pr/<N> - the branch the PR is made from anyway. Only
+    that one ref is pushed; branches, tags and Gitea's own refs/pull/* are not touched.
+    True when the branch is there afterwards."""
+    cache = os.path.join(HERE, "tmp", "github-to-gitea-git", OWNER, NAME + ".git")
+    gh_token = github_token(GITHUB_REPO.split("/")[0])
+    try:
+        if not os.path.exists(os.path.join(cache, "HEAD")):
+            os.makedirs(cache, exist_ok=True)
+            subprocess.run(["git", "init", "--quiet", "--bare", cache], check=True)
+        log(f"  PR #{num}: fetching {sha[:10]} from GitHub, to push it to Gitea as {branch}")
+        subprocess.run(["git", "-C", cache, "fetch", "--quiet", "--no-tags", github_git_url(),
+                        f"+refs/pull/{num}/head:refs/github-pull/{num}/head"], check=True,
+                       env=git_auth_env(gh_token) if gh_token else dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        got = subprocess.run(["git", "-C", cache, "rev-parse", f"refs/github-pull/{num}/head"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if got != sha:
+            log(f"  PR #{num}: GitHub's refs/pull/{num}/head is {got[:10]}, not {sha[:10]}; not pushed")
+            return False
+        if DRY:
+            log(f"    [dry-run] git push {gitea_git_url()} {sha}:refs/heads/{branch}")
+            return True
+        subprocess.run(["git", "-C", cache, "push", "--quiet", gitea_git_url(), f"{sha}:refs/heads/{branch}"],
+                       check=True, env=git_auth_env(os.environ["GITEA_TOKEN"]))
+    except (subprocess.CalledProcessError, OSError) as e:
+        log(f"  PR #{num}: pushing the head commit to Gitea failed: {e}")
+        return False
+    s, _ = gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))
+    return s == 200
+
+
 def create_pull(num):
     pr = gh(f"repos/{GITHUB_REPO}/pulls/{num}")
     branch = f"github-pr/{num}"
     s, _ = gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))
     if s != 200:
         s, d = gt("POST", "/branches", {"new_branch_name": branch, "old_ref_name": pr["head"]["sha"]})
-        if s != 201 and not DRY:
-            fail(f"PR #{num}: head commit {pr['head']['sha'][:10]} is missing from the Gitea repository ({s} {d}).\n"
-                     f"Run the script on the machine that has Gitea's bare repository (setting bare_repo), so "
-                     f"that refs/pull/{num}/head is fetched. The PR is not made an issue: the numbers would get out of step.")
+        if s != 201 and not DRY and not (find_bare() is None and push_pr_head(num, pr["head"]["sha"], branch)):
+            fail(f"PR #{num}: head commit {pr['head']['sha'][:10]} is missing from the Gitea repository ({s} {d}),\n"
+                     f"and pushing it from GitHub did not work either (see above). Run the script on the machine "
+                     f"that has Gitea's bare repository (setting bare_repo), or with a Gitea token that may push. "
+                     f"The PR is not made an issue: the numbers would get out of step.")
     s, d = gt("POST", "/pulls", {"title": pr["title"], "body": attribution(pr) + (pr.get("body") or ""),
                                  "head": branch, "base": pr["base"]["ref"],
                                  "labels": label_ids(pr.get("labels")),
