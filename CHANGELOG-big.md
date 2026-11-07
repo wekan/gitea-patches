@@ -68,6 +68,17 @@ resumes, and `tests/mirror.test.py` runs both against fake forges.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/8121fae85ba317f2daa619e58a30f94e830814da">Mirror the avatars of organizations, users and repositories</a>. Thanks to xet7.</summary>
+
+A new step, `avatars`, in all three tools. github-to-gitea copies GitHub's
+organization and user avatars onto Gitea, and a repository's custom social
+preview image as its avatar; gitea-to-gitlab copies them onto GitLab groups and
+projects; SourceForge has no API for project icons, which is reported. An avatar
+is uploaded again only when the image changes.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
