@@ -2,3 +2,10 @@
 __pycache__/
 /gitea/
 /out/
+# gitea-to-gitlab / gitea-to-sourceforge: settings with tokens, progress, run logs,
+# and their git work copies are this machine's, never committed.
+mirror/gitea-to-*/*.ini
+mirror/gitea-to-*/*.ini.tmp
+mirror/gitea-to-*/*-state.json*
+mirror/gitea-to-*/log/
+mirror/gitea-to-*/work/

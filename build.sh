@@ -38,7 +38,8 @@ case "$command" in
   test)
     python3 -I tests/translations.test.py
     bash tests/apply-patches.sh
-    bash tests/source-zips.sh ;;
+    bash tests/source-zips.sh
+    python3 -I tests/mirror.test.py ;;
   release-all)
     exec gh workflow run release-all.yml -R wekan/gitea-patches ${1:+-f ref="$1"} ;;
   release-all-missing)

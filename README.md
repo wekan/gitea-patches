@@ -52,12 +52,21 @@ source locally.
 
 See [how the build works](docs/Design/How-the-build-works.md).
 
+## Mirroring
+
+[mirror/](mirror/README.md) copies GitHub to the local Gitea (`github-to-gitea`), and
+the local Gitea on to GitLab (`gitea-to-gitlab`) and SourceForge
+(`gitea-to-sourceforge`): git, wiki, issues and pull requests with comments, and
+releases with their files - with the same menu, and in step with WeKan's
+`releases/mirror.sh`.
+
 ## Tests
 
 ```sh
 python3 -I tests/translations.test.py   # the translation merge rules
 bash tests/apply-patches.sh             # clone + commits, against a local fixture
 bash tests/source-zips.sh               # the zips: contents, names, reproducibility
+python3 -I tests/mirror.test.py         # mirror/: Gitea -> GitLab and SourceForge
 ```
 
 None of them needs the network.
