@@ -85,4 +85,26 @@ a string whose `%`-verbs or HTML tags differ from the English.
 
 </details>
 
+and has the following developer-facing changes:
+
+**Changelog** - two files, as in WeKan.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/58b3df05069bb451ac72d5b1cb218795e657db74">CHANGELOG.md is the upcoming release and each release in short, from CHANGELOG-big.md</a>. Thanks to xet7.</summary>
+
+The changelog that is written is now `CHANGELOG-big.md`, every entry in full.
+`CHANGELOG.md` is generated from it by `releases/changelog-short.py`: the
+**In short** paragraph of the Upcoming release and of each of the five newest
+releases, each linking all of its changes, in plain Markdown. Run on WeKan's
+own `CHANGELOG-big.md` with WeKan's headings, the generator writes exactly
+WeKan's `CHANGELOG.md`. `tests/changelogShort.test.py` fails when
+`CHANGELOG.md` is out of date, and checks `CHANGELOG-big.md`'s headings, its
+In short paragraphs and that every summary links its commit.
+
+</details>
+
+**Mirroring tools** - where they are.
+
+- [Move github-to-gitea into mirror/, beside gitea-to-gitlab and gitea-to-sourceforge](https://github.com/wekan/gitea-patches/commit/9713a8ade052985bf5c8e4ef81bac54604ab25d9). Thanks to xet7.
+
 Thanks to above GitHub users for their contributions and translators for their translations.
