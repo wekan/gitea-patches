@@ -79,6 +79,18 @@ is uploaded again only when the image changes.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/0109b7aee7d8e9992efa2e235d812a69fc74f108">github-to-gitea mirrors the newest release's files by default, deletes older releases' files, one file at a time</a>. Thanks to xet7.</summary>
+
+`release_assets` is `github` by default (it was `none`), and the new
+`release_assets_keep` says which releases keep their files: `newest` (the
+default), `all`, or a number of the newest releases; the files of older
+releases are deleted from Gitea. A file from GitHub is downloaded alone to
+WeKan's `.tools/tmp/github-to-gitea/`, uploaded, and deleted - also when that
+fails. `tests/githubToGiteaReleases.test.py` covers each setting.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
