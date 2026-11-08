@@ -138,7 +138,10 @@ appear on a git command line. A commit Gitea does not have is
 without first asking Gitea for a branch of it - which only wrote a 500 to its
 log - and Gitea's "Create a new pull request" push messages are not shown.
 `tests/githubToGiteaPush.test.py` runs it against local repositories standing
-in for GitHub and Gitea.
+in for GitHub and Gitea. And Gitea's paging
+[ends on a page that brings nothing new](https://github.com/wekan/gitea-patches/commit/ef874664d6e5fdcb3a091c607ac532996c302979):
+Gitea ignores page for an issue's comments with `?since=`, and a run went on to
+page 83636 of one comment.
 
 </details>
 
