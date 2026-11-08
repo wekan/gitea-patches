@@ -204,6 +204,21 @@ now gives `maxFiles` 0, and the upload test checks 0 too.
 
 </details>
 
+**A release of many versions** - rustdesk's nightly style, newest version only.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/488f9603687b59c0900b90bfbeee0dae0015cbfb">The mirror scripts copy only the newest version's files from a release of many versions</a>. Thanks to xet7.</summary>
+
+A release like rustdesk's `nightly` holds the same files with different version
+numbers: 352 files of 20 versions, 9.5 GB. When a file name, its version number
+taken out, appears with more than one version, only the newest version's files
+are copied (24 files, 780 MB), and older versions' files already at the
+destination are deleted. Any other release keeps every file, and so does
+Releases kept in full. GitLab now deletes single package files rather than the
+release's whole package.
+
+</details>
+
 **Freeing disk space** - in the local Gitea.
 
 <details>
