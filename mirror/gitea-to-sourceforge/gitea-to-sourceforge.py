@@ -25,32 +25,73 @@ SOURCEFORGE - the same layout as WeKan's releases/mirror.sh, so both find each o
     registered at SourceForge (setting user); never forced, never deleting anything.
   - Issues and pull requests (as "[PR] ...") become tickets of a Tracker tool: for the
     repository named like the project the project's existing tracker, otherwise
-    repo-<name>-issues-<hash>, created when missing. Needs the OAuth token.
+    repo-<name>-issues-<hash>, created when missing. Needs the OAuth2 sign-in below.
   - Release files go to the project's Files over sftp:
     <files_dir>[/<repository>]/<tag>/, with README.md holding the release notes. Each
     file is uploaded as .part and renamed when complete, so an interrupted upload is
     never mistaken for a finished file.
   - SourceForge projects are public: a private Gitea repository is not mirrored.
     SourceForge's wiki is not a git repository, so the wiki is not mirrored.
+
+SIGNING IN - an OAuth2 application of your own
+  1. At https://sourceforge.net/auth/oauth/ register an OAuth2 application, with the
+     redirect URL https://localhost/ (or the one in setting redirect_uri: it must be
+     https:// and exactly the same).
+  2. Put its Client ID and Client Secret in the settings (client_id, client_secret).
+  3. Menu 10) Sign in to SourceForge: open the address it shows, authorize, and paste
+     the address the browser then goes to - a page that does not load is fine, the
+     code is in its address. The access token and its refresh token are saved in the
+     settings file, and the access token is renewed with the refresh token when it
+     expires, so cron runs need no browser after that.
 """
 
+import base64
 import hashlib
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 import gitea_mirror as gm  # noqa: E402
 
-# SourceForge's REST API, as https://sourceforge.net/api-docs/ documents it: an OAuth
-# bearer token (hexadecimal, from https://sourceforge.net/auth/oauth/), tickets created
-# and saved as multipart/form-data, comments posted as a urlencoded form. The API has no
-# file releases: those go over sftp to frs.sourceforge.net, as SourceForge documents.
+# SourceForge's REST API, as https://sourceforge.net/api-docs/ documents it: OAuth2 with
+# an application's Client ID and Client Secret, tickets created and saved as
+# multipart/form-data, comments posted as a urlencoded form. The API has no file
+# releases: those go over sftp to frs.sourceforge.net, as SourceForge documents.
 REST = "https://sourceforge.net/rest/p"
-TOKEN_FORMAT = re.compile(r"[0-9a-f]+")
+AUTHORIZE = "https://sourceforge.net/auth/oauth2/authorize"
+TOKEN = "https://sourceforge.net/rest/oauth2/token"
+OAUTH_SECTION = "sourceforge_oauth2"  # tokens; written by the sign-in, not by the menu
+# What a bearer token may hold (RFC 6750 b64token): nothing that could end the header.
+TOKEN_FORMAT = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+
+
+def pkce_pair():
+    """(code_verifier, S256 code_challenge) - api-docs: 43-128 characters, base64url of SHA-256."""
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def code_from(answer, state):
+    """The authorization code from the pasted redirect address, or a code pasted alone."""
+    answer = answer.strip()
+    if "?" not in answer and "=" not in answer:
+        return answer
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(answer).query or answer.split("?", 1)[-1]))
+    if q.get("error"):
+        raise SystemExit(f"SourceForge did not authorize: {q.get('error_description') or q['error']}")
+    if q.get("state") != state:
+        raise SystemExit("The address is not the answer to this sign-in (its state differs): sign in again")
+    if not q.get("code"):
+        raise SystemExit("The address has no code: paste the whole address the browser went to")
+    return q["code"]
 
 
 def mount(name, suffix=""):
@@ -88,7 +129,10 @@ class SourceForge:
 # [destinations]: <gitea owner> = <SourceForge project>, when it is not the same name.
 """
     SETTINGS = [
-        ("sourceforge", "token", "", "SourceForge OAuth bearer token (tickets, creating tools)"),
+        ("sourceforge", "client_id", "", "Client ID of your OAuth2 application at https://sourceforge.net/auth/oauth/"),
+        ("sourceforge", "client_secret", "", "Client Secret of the same OAuth2 application"),
+        ("sourceforge", "redirect_uri", "https://localhost/",
+         "redirect URL registered in the application (https://, exactly the same); then menu 10) Sign in"),
         ("sourceforge", "user", "", "SourceForge user name for ssh: git push and release files (your SSH key)"),
         ("sourceforge", "project", "{owner}", "SourceForge project of a Gitea owner without a Destinations line"),
         ("sourceforge", "files_dir", "GitHub-releases", "directory of release files in the project's Files (WeKan's mirror uses GitHub-releases)"),
@@ -96,21 +140,111 @@ class SourceForge:
         ("sourceforge", "closed_status", "closed", "ticket status of a closed issue"),
     ]
 
+    MENU_EXTRA = [("Sign in to SourceForge (OAuth2: Client ID and Client Secret in Settings)", "sign_in")]
+
     def missing_settings(self, cfg):
-        return [f"[sourceforge] {k}" for k in ("token", "user") if not cfg.get(k, "sourceforge")]
+        return [f"[sourceforge] {k}" for k in ("client_id", "client_secret", "user") if not cfg.get(k, "sourceforge")]
 
     def configure(self, e):
         self.e = e
-        self.token = e.cfg.get("token", "sourceforge")
-        self.user = e.cfg.get("user", "sourceforge")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.user):
-            raise SystemExit("[sourceforge] user is not a valid SourceForge user name")
-        if self.token and not TOKEN_FORMAT.fullmatch(self.token):
-            raise SystemExit("[sourceforge] token is not a SourceForge bearer token (hexadecimal): "
-                             "make one at https://sourceforge.net/auth/oauth/")
+        self.client_id = e.cfg.get("client_id", "sourceforge").strip()
+        self.client_secret = e.cfg.get("client_secret", "sourceforge").strip()
+        self.redirect_uri = e.cfg.get("redirect_uri", "sourceforge").strip() or "https://localhost/"
         self.files_dir = e.cfg.get("files_dir", "sourceforge").strip("/") or "GitHub-releases"
         self.open_status = e.cfg.get("open_status", "sourceforge") or "open"
         self.closed_status = e.cfg.get("closed_status", "sourceforge") or "closed"
+        self.user = e.cfg.get("user", "sourceforge")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.user):
+            raise SystemExit("[sourceforge] user is not a valid SourceForge user name")
+        if not self.redirect_uri.startswith("https://"):
+            raise SystemExit("[sourceforge] redirect_uri must begin with https://, as SourceForge requires")
+        cfg = e.cfg.cfg
+        old = cfg.get("sourceforge", "token", fallback="").strip()
+        if cfg.has_option("sourceforge", "token"):
+            # A bearer token made by hand (the earlier setting token) still works until it
+            # is replaced by signing in; it has no refresh token and does not expire.
+            if old and not self.oauth("access_token"):
+                if not cfg.has_section(OAUTH_SECTION):
+                    cfg.add_section(OAUTH_SECTION)
+                cfg.set(OAUTH_SECTION, "access_token", old)
+            cfg.remove_option("sourceforge", "token")
+            e.cfg.save()
+        self.token = self.oauth("access_token")
+        if self.token and not TOKEN_FORMAT.fullmatch(self.token):
+            raise SystemExit(f"[{OAUTH_SECTION}] access_token is not a bearer token: sign in again (menu 10)")
+
+    # OAuth2: https://sourceforge.net/api-docs/ - authorization code, then refresh token
+    def oauth(self, key):
+        return self.e.cfg.cfg.get(OAUTH_SECTION, key, fallback="").strip()
+
+    def save_tokens(self, data):
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise SystemExit(f"SourceForge gave no access token: {gm.message(data)}")
+        if not TOKEN_FORMAT.fullmatch(data["access_token"]):
+            raise SystemExit("SourceForge's access token has characters a bearer token cannot have")
+        cfg = self.e.cfg.cfg
+        if not cfg.has_section(OAUTH_SECTION):
+            cfg.add_section(OAUTH_SECTION)
+        cfg.set(OAUTH_SECTION, "access_token", data["access_token"])
+        # A refresh answer may leave the refresh token out: the old one is still good.
+        if data.get("refresh_token"):
+            cfg.set(OAUTH_SECTION, "refresh_token", data["refresh_token"])
+        expires = data.get("expires_in")
+        cfg.set(OAUTH_SECTION, "expires_at", str(int(time.time()) + int(expires)) if str(expires or "").isdigit() else "")
+        self.e.cfg.save()
+        self.token = data["access_token"]
+
+    def token_request(self, form):
+        status, data, _ = gm.http("POST", TOKEN, form=dict(form, client_id=self.client_id, client_secret=self.client_secret))
+        if status != 200:
+            raise SystemExit(f"SourceForge {TOKEN}: {status} {gm.message(data)}")
+        self.save_tokens(data)
+
+    def refresh(self):
+        """A new access token from the refresh token; False when there is none to use."""
+        rt = self.oauth("refresh_token")
+        if not rt:
+            return False
+        self.token_request({"grant_type": "refresh_token", "refresh_token": rt})
+        return True
+
+    def ensure_token(self):
+        if not self.token:
+            if sys.stdin.isatty() and not getattr(self, "_asked", False):
+                self._asked = True
+                if gm.ask("Not signed in to SourceForge. Sign in now? (y/n)", "y").lower().startswith("y"):
+                    self.sign_in(self.e)
+                    return
+            raise SystemExit("Not signed in to SourceForge: menu 10) Sign in to SourceForge")
+        expires = self.oauth("expires_at")
+        if expires.isdigit() and int(expires) - 60 <= time.time():
+            self.refresh()
+
+    def sign_in(self, e):
+        """The authorization code flow, with PKCE: the browser authorizes, the address comes back here."""
+        missing = [m for m in self.missing_settings(e.cfg) if "user" not in m]
+        if missing:
+            raise SystemExit(f"Missing {', '.join(missing)}: register an OAuth2 application at "
+                             "https://sourceforge.net/auth/oauth/ and put them in Settings")
+        if not getattr(self, "e", None):
+            self.configure(e)
+        state = secrets.token_urlsafe(16)
+        verifier, challenge = pkce_pair()
+        url = AUTHORIZE + "?" + urllib.parse.urlencode({
+            "client_id": self.client_id, "response_type": "code", "redirect_uri": self.redirect_uri,
+            "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+        print(f"""
+Open this address in a browser, sign in to SourceForge and press Authorize:
+
+  {url}
+
+The browser then goes to {self.redirect_uri}?code=... - the page may not load, that is
+fine. Copy the whole address from the browser's address bar and paste it here.""")
+        code = code_from(gm.ask("Address (or the code alone)"), state)
+        self.token_request({"grant_type": "authorization_code", "code": code,
+                            "redirect_uri": self.redirect_uri, "code_verifier": verifier})
+        gm.log("Signed in to SourceForge: the access token and refresh token are saved in "
+               f"{os.path.basename(e.ini)} [{OAUTH_SECTION}].")
 
     def default_destination(self, cfg):
         return cfg.get("project", "sourceforge") or "{owner}"
@@ -126,11 +260,17 @@ class SourceForge:
         return "code" if name == project else mount(name)
 
     # REST
-    def call(self, method, path, form=None, multipart=False):
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+    def call(self, method, path, form=None, multipart=False, retried=False):
+        self.ensure_token()
+        headers = {"Authorization": f"Bearer {self.token}"}
         if multipart:
-            return gm.http(method, f"{REST}/{path}", headers, form=form, multipart=True)
-        return gm.http(method, f"{REST}/{path}", headers, form=form)
+            r = gm.http(method, f"{REST}/{path}", headers, form=form, multipart=True)
+        else:
+            r = gm.http(method, f"{REST}/{path}", headers, form=form)
+        # An access token revoked or expired early: renew it once and ask again.
+        if r[0] == 401 and not retried and self.refresh():
+            return self.call(method, path, form, multipart, retried=True)
+        return r
 
     def ok(self, method, path, form=None, multipart=False):
         status, data, _ = self.call(method, path, form, multipart)
@@ -344,6 +484,13 @@ class SourceForge:
     def check_online(self, e):
         out = []
         projects = sorted({e.destination(s.split("/")[0]) for s in e.cfg.sources() if s not in gm.SPECIAL})
+        try:
+            self.ensure_token()
+            out.append(("signed in (OAuth2)" + (", the access token is renewed with its refresh token"
+                                               if self.oauth("refresh_token") else ""), True))
+        except SystemExit as err:
+            out.append((str(err), False))
+            projects = []
         for p in projects:
             status, data, _ = self.call("GET", p)
             out.append((f"project {p}: " + ("found" if status == 200 else f"{status} {gm.message(data)}"), status == 200))

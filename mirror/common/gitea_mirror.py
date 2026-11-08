@@ -1171,9 +1171,12 @@ def menu_destinations(e):
                 e.cfg.save()
 
 
+SECRET_KEYS = ("token", "password", "client_secret")
+
+
 def masked(e, section, key):
     v = e.cfg.cfg.get(section, key, fallback="")
-    if key in ("token", "password"):
+    if key in SECRET_KEYS:
         return f"{v[:4]}…{v[-4:]}" if len(v) > 8 else ("(set)" if v else "(missing)")
     return v
 
@@ -1190,8 +1193,8 @@ def menu_settings(e):
             return
         if c.isdigit() and 1 <= int(c) <= len(settings):
             s, k, d, desc = settings[int(c) - 1]
-            v = ask(f"{s}.{k} ({desc})", "" if k == "token" else e.cfg.get(k, s))
-            if k == "token" and not v:
+            v = ask(f"{s}.{k} ({desc})", "" if k in SECRET_KEYS else e.cfg.get(k, s))
+            if k in SECRET_KEYS and not v:
                 continue
             if k == "steps":
                 bad = [x for x in re.split(r"[,\s]+", v) if x and x not in STEPS]
@@ -1280,8 +1283,11 @@ Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the new
  6) Dry run on / off
  7) Check Gitea and {t.TITLE} access (read-only)
  8) Check what is not mirrored yet (read-only)
- 9) Releases kept in full: which organizations, users or repositories keep every release
- 0) Quit""")
+ 9) Releases kept in full: which organizations, users or repositories keep every release""")
+        extra = getattr(t, "MENU_EXTRA", ())
+        for n, (label, _) in enumerate(extra, 10):
+            print(f"{n:2}) {label}")
+        print(" 0) Quit")
         c = ask("Choice")
         try:
             if c in ("0", "q", ""):
@@ -1311,6 +1317,8 @@ Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the new
                 e.check_missing(pick_source(e))
             elif c == "9":
                 menu_releases_all(e)
+            elif c.isdigit() and 10 <= int(c) < 10 + len(extra):
+                getattr(t, extra[int(c) - 10][1])(e)
         except SystemExit as err:
             print(err)
         except KeyboardInterrupt:

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -390,12 +391,23 @@ class FakeSF(Fake):
         self.tools = [{"mount_point": "code", "name": "git"}]
         self.tickets, self.saved, self.files = {}, [], {}
         self.encodings, self.auth, self.admin, self.paths = {}, set(), True, []
+        self.token_forms, self.rejected, self.next_token = [], set(), 0
 
     def __call__(self, method, url, headers=None, json_body=None, form=None, body=None, timeout=600, retry=None, multipart=False):
         u = urllib.parse.urlsplit(url)
         if u.netloc == "gitea.test":
             return super().__call__(method, url, headers, json_body, form, body, timeout, retry)
+        if u.path == "/rest/oauth2/token":
+            # Allura's token endpoint: the client authenticates in the form, a new pair comes back.
+            self.token_forms.append(dict(form))
+            if form.get("client_secret") != "csecret":
+                return 401, {"error": "invalid_client"}, {}
+            self.next_token += 1
+            return 200, {"access_token": f"New{self.next_token}tok", "refresh_token": f"r{self.next_token}",
+                         "expires_in": 3600, "token_type": "Bearer"}, {}
         path, q = urllib.parse.unquote(u.path).removeprefix("/rest/p/"), dict(urllib.parse.parse_qsl(u.query))
+        if (headers or {}).get("Authorization", "").removeprefix("Bearer ") in self.rejected:
+            return 401, {"error": "invalid_token"}, {}
         self.auth.add((headers or {}).get("Authorization"))
         self.paths.append(path)
         if method != "GET":
@@ -442,8 +454,9 @@ fsf = FakeSF()
 gm.http = fsf
 s = gm.Engine(sf_mod.SourceForge(), sf_here)
 s.cfg.load()
-for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "0123abcd"), ("sourceforge", "user", "wekan")):
+for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "client_id", "cid"), ("sourceforge", "client_secret", "csecret"), ("sourceforge", "user", "wekan")):
     s.cfg.set(sec, k, v)
+s.cfg.cfg.read_dict({"sourceforge_oauth2": {"access_token": "0123abcd"}})
 s.configure()
 s.load_state()
 s.download = e.download
@@ -525,16 +538,135 @@ check("negative: Check access reports a token that may not administer the projec
 check("... asked with has_access?user=<user>&perm=admin", "wekan/has_access" in fsf.paths)
 s.t.sftp = fake_sftp
 
-# negative: a token that is not a SourceForge bearer token is refused before any request.
-s.cfg.set("sourceforge", "token", "Bearer not-hex!")
+# --- SourceForge OAuth2: Client ID and Client Secret, sign-in, refresh -------------------------
+import contextlib
+import io
+oauth = s.cfg.cfg
+check("SourceForge: settings have client_id, client_secret and redirect_uri, not a hand-made token",
+      [k for sec, k, *_ in sf_mod.SourceForge.SETTINGS if sec == "sourceforge"][:3] == ["client_id", "client_secret", "redirect_uri"]
+      and "token" not in [k for sec, k, *_ in sf_mod.SourceForge.SETTINGS])
+check("SourceForge: the Client Secret is masked in the menu", gm.masked(s, "sourceforge", "client_secret") == "(set)")
+check("SourceForge: menu 10 is Sign in", sf_mod.SourceForge.MENU_EXTRA[0][1] == "sign_in")
+
+
+def sign_in_with(answer_of):
+    """Runs the sign-in; answer_of(printed text) is what the user pastes."""
+    out = io.StringIO()
+    real_ask = gm.ask
+    gm.ask = lambda prompt, default="": answer_of(out.getvalue())
+    try:
+        with contextlib.redirect_stdout(out):
+            s.t.sign_in(s)
+    finally:
+        gm.ask = real_ask
+    return out.getvalue()
+
+
+def printed_query(text):
+    url = re.search(r"https://sourceforge\.net/auth/oauth2/authorize\?\S+", text).group(0)
+    return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+
+
+fsf.token_forms.clear()
+seen = {}
+sign_in_with(lambda text: seen.update(printed_query(text)) or f"https://localhost/?code=C1&state={seen['state']}")
+tf = fsf.token_forms[0]
+check("SourceForge sign-in: the authorize address has client_id, response_type=code, redirect_uri and S256 PKCE",
+      seen.get("client_id") == "cid" and seen.get("response_type") == "code" and seen.get("redirect_uri") == "https://localhost/"
+      and seen.get("code_challenge_method") == "S256" and len(seen.get("state", "")) >= 16)
+check("SourceForge sign-in: the code is exchanged at /rest/oauth2/token with the client's id and secret",
+      tf.get("grant_type") == "authorization_code" and tf.get("code") == "C1" and tf.get("client_id") == "cid"
+      and tf.get("client_secret") == "csecret" and tf.get("redirect_uri") == "https://localhost/")
+import base64 as _b64
+import hashlib as _hl
+check("SourceForge sign-in: the code_verifier matches the code_challenge (S256)",
+      _b64.urlsafe_b64encode(_hl.sha256(tf["code_verifier"].encode()).digest()).rstrip(b"=").decode() == seen["code_challenge"]
+      and 43 <= len(tf["code_verifier"]) <= 128)
+check("SourceForge sign-in: the access and refresh tokens are saved in [sourceforge_oauth2]",
+      oauth.get("sourceforge_oauth2", "access_token") == "New1tok" and oauth.get("sourceforge_oauth2", "refresh_token") == "r1"
+      and int(oauth.get("sourceforge_oauth2", "expires_at")) > time.time() + 3000
+      and "New1tok" in open(s.ini, encoding="utf-8").read() and oct(os.stat(s.ini).st_mode & 0o777) == "0o600")
+fsf.auth.clear()
+s.t.ok("GET", "wekan")
+check("SourceForge: requests then carry the new access token", fsf.auth == {"Bearer New1tok"})
+sign_in_with(lambda text: "C2")
+check("SourceForge sign-in: a code pasted alone works too", fsf.token_forms[-1].get("code") == "C2")
+
+# The access token expires: the refresh token renews it before the request.
+oauth.set("sourceforge_oauth2", "expires_at", str(int(time.time()) - 5))
+fsf.token_forms.clear()
+fsf.auth.clear()
+s.t.ok("GET", "wekan")
+check("SourceForge: an expired access token is renewed with the refresh token first",
+      fsf.token_forms and fsf.token_forms[0].get("grant_type") == "refresh_token" and fsf.token_forms[0].get("refresh_token") == "r2"
+      and fsf.token_forms[0].get("client_secret") == "csecret" and fsf.auth == {"Bearer New3tok"})
+# Revoked early: a 401 renews once and asks again.
+fsf.rejected.add("New3tok")
+fsf.token_forms.clear()
+fsf.auth.clear()
+s.t.ok("GET", "wekan")
+check("SourceForge: a 401 renews the access token once and the request is asked again",
+      len(fsf.token_forms) == 1 and fsf.auth == {"Bearer New4tok"})
+
+# negatives
+for label, answer_of in (("an address of another sign-in (state differs)", lambda text: "https://localhost/?code=C9&state=other"),
+                         ("a refused authorization", lambda text: f"https://localhost/?error=access_denied&state={printed_query(text)['state']}"),
+                         ("an address without a code", lambda text: f"https://localhost/?state={printed_query(text)['state']}")):
+    fsf.token_forms.clear()
+    try:
+        sign_in_with(answer_of)
+        refused = False
+    except SystemExit:
+        refused = True
+    check(f"negative: sign-in refuses {label}, and asks SourceForge for nothing", refused and not fsf.token_forms)
+oauth.set("sourceforge", "client_secret", "wrong")
+s.t.configure(s)
+try:
+    sign_in_with(lambda text: "C3")
+    refused = False
+except SystemExit as err:
+    refused = "401" in str(err)
+check("negative: a wrong Client Secret is reported, no token is saved",
+      refused and oauth.get("sourceforge_oauth2", "access_token") == "New4tok")
+oauth.set("sourceforge", "client_secret", "csecret")
+oauth.set("sourceforge", "redirect_uri", "http://localhost/")
 try:
     s.t.configure(s)
     refused = False
 except SystemExit as err:
-    refused = "hexadecimal" in str(err)
-check("negative: a token that is not hexadecimal is refused", refused)
-s.cfg.set("sourceforge", "token", "0123abcd")
+    refused = "https://" in str(err)
+check("negative: a redirect_uri that is not https:// is refused (SourceForge requires it)", refused)
+oauth.set("sourceforge", "redirect_uri", "https://localhost/")
+oauth.set("sourceforge_oauth2", "access_token", "bad token\r\nX-Evil: 1")
+try:
+    s.t.configure(s)
+    refused = False
+except SystemExit:
+    refused = True
+check("negative: a stored access token that could end the header is refused", refused)
+try:
+    s.t.save_tokens({"access_token": "a\nb"})
+    refused = False
+except SystemExit:
+    refused = True
+check("negative: an access token with a line break from SourceForge is not saved", refused)
+oauth.set("sourceforge_oauth2", "access_token", "")
+oauth.set("sourceforge_oauth2", "refresh_token", "")
 s.t.configure(s)
+s.t._asked = True
+try:
+    s.t.ok("GET", "wekan")
+    refused = False
+except SystemExit as err:
+    refused = "Sign in" in str(err)
+check("negative: not signed in, a run stops and says to sign in, asking SourceForge nothing", refused)
+check("negative: Check access reports not being signed in", any("Not signed in" in m and not good for m, good in s.t.check_online(s)))
+# A hand-made bearer token of the earlier setting token moves to [sourceforge_oauth2].
+oauth.set("sourceforge", "token", "0123abcd")
+s.t.configure(s)
+check("SourceForge: an earlier [sourceforge] token is moved to [sourceforge_oauth2] access_token",
+      oauth.get("sourceforge_oauth2", "access_token") == "0123abcd" and not oauth.has_option("sourceforge", "token")
+      and s.t.token == "0123abcd")
 
 # --- releases: only the newest, unless "Releases kept in full" lists the repository ----------
 def three_releases(f):
@@ -656,8 +788,9 @@ gm.http = fsf2
 os.makedirs(os.path.join(TMP, "sf2"))
 s2 = gm.Engine(sf_mod.SourceForge(), os.path.join(TMP, "sf2"))
 s2.cfg.load()
-for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "0123abcd"), ("sourceforge", "user", "wekan")):
+for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "client_id", "cid"), ("sourceforge", "client_secret", "csecret"), ("sourceforge", "user", "wekan")):
     s2.cfg.set(sec, k, v)
+s2.cfg.cfg.read_dict({"sourceforge_oauth2": {"access_token": "0123abcd"}})
 s2.configure()
 s2.load_state()
 s2.download = e.download

@@ -165,16 +165,38 @@ A missing GitLab project is created, in a group that must exist. A SourceForge p
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools
 are created by the script.
 
-gitea-to-sourceforge uses SourceForge's REST API as
-[sourceforge.net/api-docs](https://sourceforge.net/api-docs/) documents it:
-`[sourceforge] token` is an OAuth bearer token - hexadecimal, made at
-<https://sourceforge.net/auth/oauth/> - sent as `Authorization: Bearer <token>`;
+gitea-to-sourceforge signs in to SourceForge with OAuth2, as an application of your
+own:
+
+1. At <https://sourceforge.net/auth/oauth/> register an **OAuth2 application** with
+   the redirect URL `https://localhost/`. SourceForge takes only `https://` addresses,
+   and the one the script sends must be exactly the same: another address goes in
+   the setting `redirect_uri`.
+2. Put the application's **Client ID** and **Client Secret** in Settings
+   (`client_id`, `client_secret`; the secret is masked in the menu).
+3. Choose **10) Sign in to SourceForge**, open the address it shows, and press
+   Authorize. The browser then goes to `https://localhost/?code=...&state=...`.
+   Nothing answers there, so the page does not load, but the code is in its address:
+   copy the whole address from the address bar and paste it into the script.
+
+The script exchanges the code (with PKCE) for an access token and a refresh token
+and saves them in `gitea-to-sourceforge.ini` (mode 600) under
+`[sourceforge_oauth2]`. An access token expires after a while. Before it does, and
+whenever SourceForge answers 401, the script gets a new one with the refresh
+token, so a cron run never needs the browser again. A run that is not signed in
+stops and says so; in a terminal, it offers to sign in. A token made earlier with
+the old `[sourceforge] token` setting moves to `[sourceforge_oauth2]` and works
+until you sign in.
+
+It uses SourceForge's REST API as
+[sourceforge.net/api-docs](https://sourceforge.net/api-docs/) documents it: requests
+carry `Authorization: Bearer <access token>`;
 tools are created with `admin/install_tool`; tickets are listed at
 `/p/<project>/<tracker>`, created with `new` and saved with `<number>/save` as
 `multipart/form-data` (booleans `true`/`false`, custom fields
 `ticket_form.custom_fields._<name>`), and comments posted to the ticket's
-`_discuss/thread/<id>/new`. **Check access** asks `has_access?perm=admin` whether the
-token may administer the project, which creating tools needs. The API has no file
+`_discuss/thread/<id>/new`. **Check access** says whether the script is signed in,
+and asks `has_access?perm=admin` whether the token may administer the project, which creating tools needs. The API has no file
 releases, so release files go over sftp to `frs.sourceforge.net`, the way SourceForge
 documents it, and git over SSH to `git.code.sf.net`.
 
