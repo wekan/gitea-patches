@@ -26,7 +26,11 @@ the Finnish translation and its release workflows - both are here now.
 
 - **Finnish** ([dist/translations/fi-FI.md](dist/translations/fi-FI.md)): the
   Gitea web UI completely in Finnish, where upstream has about a third of it.
-- **Code patches**: none yet. `dist/all/` is where one goes; see
+- **Release files of any size**
+  ([dist/all/release-files-any-size.md](dist/all/release-files-any-size.md)):
+  `[repository.release] FILE_MAX_SIZE` is `-1`, no limit, by default, and `-1` works
+  in the API's streamed uploads and in the upload form, where upstream refuses every
+  file with it. Code patches are in `dist/all/`; see
   [the patch format](docs/Design/Patch-format.md).
 
 ## Making a release

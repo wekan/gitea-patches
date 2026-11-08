@@ -85,6 +85,11 @@ most one release file is on the disk at a time.
   FILE_MAX_SIZE = -1
   ```
 
+  A Gitea built from this repository has `-1` as its default
+  ([dist/all/release-files-any-size.md](../dist/all/release-files-any-size.md)), with
+  the API's streamed uploads and the upload form fixed to take it; upstream Gitea needs
+  the line above.
+
   Gitea writes an uploaded file to its temporary directory before storing it, so the
   `TMPDIR` of the Gitea process needs room for the largest file - `/tmp` is often a
   small tmpfs - and a reverse proxy in front of Gitea needs its own request size

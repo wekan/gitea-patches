@@ -1,0 +1,198 @@
+From 47eccb8b3fc63a74347ea898f5f7fc22d711e9c3 Mon Sep 17 00:00:00 2001
+From: Lauri Ojansivu <x@xet7.org>
+Date: Sat, 7 Nov 2026 16:09:25 +0000
+Subject: [PATCH] Release files of any size by default.
+
+[repository.release] FILE_MAX_SIZE is -1, no limit, by default (it was
+2048 MB): a release is as large as what it releases, and a mirror of
+another forge's releases has no say in their sizes. A configured limit is
+kept.
+
+A negative limit was not usable before, so two places are fixed with it:
+
+- an API upload streamed as application/octet-stream wrapped the body in
+  http.MaxBytesReader with the negative limit, which Go takes as 0, so
+  every byte was refused; the reader is used only for a limit of 0 or more.
+- the upload form passed the limit to Dropzone as maxFilesize, and a
+  negative maxFilesize refuses every file, while without one Dropzone
+  applies its own 256 MiB; dropzoneMaxFilesize gives Dropzone 0, which it
+  takes as no limit, for a limit of 0 or less.
+
+Tests: TestLoadRepositoryReleaseFileMaxSize, TestUploadAttachmentSizeLimit
+(known size and streamed, with and without a limit) and dropzone.test.ts.
+---
+ custom/conf/app.example.ini            |  4 ++--
+ modules/setting/repository.go          |  2 +-
+ modules/setting/repository_test.go     | 17 +++++++++++++++++
+ services/attachment/attachment.go      |  4 +++-
+ services/attachment/attachment_test.go | 26 ++++++++++++++++++++++++++
+ web_src/js/features/dropzone.test.ts   | 12 ++++++++++++
+ web_src/js/features/dropzone.ts        | 10 +++++++++-
+ 7 files changed, 70 insertions(+), 5 deletions(-)
+ create mode 100644 web_src/js/features/dropzone.test.ts
+
+diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
+index 6f4c6df4ba..8938f547d9 100644
+--- a/custom/conf/app.example.ini
++++ b/custom/conf/app.example.ini
+@@ -1266,8 +1266,8 @@ LEVEL = Info
+ ;; Number of releases that are displayed on release page
+ ;DEFAULT_PAGING_NUM = 10
+ ;;
+-;; Max size of each release attachment file in megabytes. Defaults to 2GB
+-;FILE_MAX_SIZE = 2048
++;; Max size of each release attachment file in megabytes. -1, the default, is no limit
++;FILE_MAX_SIZE = -1
+ ;;
+ ;; Max number of release attachment files per upload. Defaults to 5
+ ;MAX_FILES =  5
+diff --git a/modules/setting/repository.go b/modules/setting/repository.go
+index aecd1fec3e..14cecd2e83 100644
+--- a/modules/setting/repository.go
++++ b/modules/setting/repository.go
+@@ -232,7 +232,7 @@ var (
+ 		}{
+ 			AllowedTypes:     "",
+ 			DefaultPagingNum: 10,
+-			FileMaxSize:      2048,
++			FileMaxSize:      -1, // no limit: a release file is as large as the release needs
+ 			MaxFiles:         5,
+ 		},
+ 
+diff --git a/modules/setting/repository_test.go b/modules/setting/repository_test.go
+index bd2779019c..51ea50593f 100644
+--- a/modules/setting/repository_test.go
++++ b/modules/setting/repository_test.go
+@@ -64,3 +64,20 @@ ORG_MAX_CREATION_LIMIT = -1
+ 		assert.Equal(t, -1, Repository.OrgMaxCreationLimit)
+ 	})
+ }
++
++func TestLoadRepositoryReleaseFileMaxSize(t *testing.T) {
++	defer test.MockVariableValue(&Repository.Release.FileMaxSize)()
++
++	cfg, err := NewConfigProviderFromData(``)
++	assert.NoError(t, err)
++	loadRepositoryFrom(cfg)
++	assert.EqualValues(t, -1, Repository.Release.FileMaxSize, "release files have no size limit by default")
++
++	cfg, err = NewConfigProviderFromData(`
++[repository.release]
++FILE_MAX_SIZE = 2048
++`)
++	assert.NoError(t, err)
++	loadRepositoryFrom(cfg)
++	assert.EqualValues(t, 2048, Repository.Release.FileMaxSize, "a configured limit is kept")
++}
+diff --git a/services/attachment/attachment.go b/services/attachment/attachment.go
+index 61b0d7d443..6793158863 100644
+--- a/services/attachment/attachment.go
++++ b/services/attachment/attachment.go
+@@ -68,7 +68,9 @@ func UploadAttachmentForRelease(ctx context.Context, file *UploaderFile, attach
+ 
+ func uploadAttachment(ctx context.Context, file *UploaderFile, allowedTypes string, maxFileSize int64, attach *repo_model.Attachment) (*repo_model.Attachment, error) {
+ 	src := file.rd
+-	if file.size < 0 {
++	// A negative limit is no limit; http.MaxBytesReader would take it as 0 and refuse
++	// every byte.
++	if file.size < 0 && maxFileSize >= 0 {
+ 		src = http.MaxBytesReader(file.respWriter, src, maxFileSize)
+ 	}
+ 	buf := make([]byte, 1024)
+diff --git a/services/attachment/attachment_test.go b/services/attachment/attachment_test.go
+index 7df200769b..d8985fb748 100644
+--- a/services/attachment/attachment_test.go
++++ b/services/attachment/attachment_test.go
+@@ -4,6 +4,9 @@
+ package attachment
+ 
+ import (
++	"bytes"
++	"io"
++	"net/http/httptest"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+@@ -14,6 +17,8 @@ import (
+ 
+ 	_ "gitea.dev/models/actions"
+ 
++	"gitea.dev/modules/util"
++
+ 	"github.com/stretchr/testify/assert"
+ )
+ 
+@@ -43,3 +48,24 @@ func TestUploadAttachment(t *testing.T) {
+ 	assert.Equal(t, user.ID, attachment.UploaderID)
+ 	assert.Equal(t, int64(0), attachment.DownloadCount)
+ }
++
++func TestUploadAttachmentSizeLimit(t *testing.T) {
++	assert.NoError(t, unittest.PrepareTestDatabase())
++	data := bytes.Repeat([]byte("x"), 3<<20)
++	upload := func(known bool, limit int64) error {
++		file := NewLimitedUploaderMaxBytesReader(io.NopCloser(bytes.NewReader(data)), httptest.NewRecorder())
++		if known {
++			file = NewLimitedUploaderKnownSize(bytes.NewReader(data), int64(len(data)))
++		}
++		_, err := uploadAttachment(t.Context(), file, "", limit, &repo_model.Attachment{RepoID: 1, UploaderID: 1, Name: "big.bin"})
++		return err
++	}
++
++	// A negative limit is no limit, whether the size is known (multipart) or not (a
++	// request body streamed as application/octet-stream).
++	assert.NoError(t, upload(true, -1<<20))
++	assert.NoError(t, upload(false, -1<<20))
++	// A limit still refuses a larger file, both ways.
++	assert.ErrorIs(t, upload(true, 1<<20), util.ErrContentTooLarge)
++	assert.ErrorIs(t, upload(false, 1<<20), util.ErrContentTooLarge)
++}
+diff --git a/web_src/js/features/dropzone.test.ts b/web_src/js/features/dropzone.test.ts
+new file mode 100644
+index 0000000000..ec8a4e3fb4
+--- /dev/null
++++ b/web_src/js/features/dropzone.test.ts
+@@ -0,0 +1,12 @@
++import {dropzoneMaxFilesize} from './dropzone.ts';
++
++test('dropzoneMaxFilesize', () => {
++  expect(dropzoneMaxFilesize('2048')).toEqual(2048);
++  // FILE_MAX_SIZE = -1, the default for release files: no limit, which is 0 for
++  // Dropzone - never its own default of 256 MiB, and never a negative size that
++  // refuses every file
++  expect(dropzoneMaxFilesize('-1')).toEqual(0);
++  expect(dropzoneMaxFilesize('0')).toEqual(0);
++  expect(dropzoneMaxFilesize('')).toEqual(0);
++  expect(dropzoneMaxFilesize('abc')).toEqual(0);
++});
+diff --git a/web_src/js/features/dropzone.ts b/web_src/js/features/dropzone.ts
+index ab6aad0355..d5da7b8c8f 100644
+--- a/web_src/js/features/dropzone.ts
++++ b/web_src/js/features/dropzone.ts
+@@ -20,6 +20,14 @@ type UploadResponse = {uuid: string};
+ type FileUuidDict = Record<string, {submitted: boolean}>;
+ 
+ // dropzone has its owner event dispatcher (emitter)
++// data-max-size is the server's limit in MiB; 0 or less (FILE_MAX_SIZE = -1) is no limit.
++// Dropzone checks the size only when maxFilesize is not 0, and without the option it
++// would apply its own default of 256 MiB.
++export function dropzoneMaxFilesize(attr: string | null): number {
++  const size = Number(attr);
++  return Number.isFinite(size) && size > 0 ? size : 0;
++}
++
+ export const DropzoneCustomEventReloadFiles = 'dropzone-custom-reload-files';
+ export const DropzoneCustomEventRemovedFile = 'dropzone-custom-removed-file';
+ export const DropzoneCustomEventUploadDone = 'dropzone-custom-upload-done';
+@@ -115,7 +123,7 @@ export async function initDropzone(dropzoneEl: HTMLElement) {
+   const accepts = dropzoneEl.getAttribute('data-accepts')!;
+   if (!['*/*', ''].includes(accepts)) opts.acceptedFiles = accepts;
+   if (dropzoneEl.hasAttribute('data-max-file')) opts.maxFiles = Number(dropzoneEl.getAttribute('data-max-file'));
+-  if (dropzoneEl.hasAttribute('data-max-size')) opts.maxFilesize = Number(dropzoneEl.getAttribute('data-max-size'));
++  if (dropzoneEl.hasAttribute('data-max-size')) opts.maxFilesize = dropzoneMaxFilesize(dropzoneEl.getAttribute('data-max-size'));
+ 
+   // there is a bug in dropzone: if a non-image file is uploaded, then it tries to request the file from server by something like:
+   // "http://localhost:3000/owner/repo/issues/[object%20Event]"
+-- 
+2.56.0
+
