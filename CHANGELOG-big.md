@@ -239,6 +239,17 @@ and fixes the following bugs:
 **Mirroring** - github-to-gitea's errors in a run of 942 repositories.
 
 <details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/60ba0a05ea6a1b54bf840a199fc6947fbbfae618">A non-UTF-8 workflow file is read, and one repository's fault no longer stops the run</a>. Thanks to xet7.</summary>
+
+A run stopped at QB64pe: a workflow file had a Windows-1252 en dash (0x96), and
+reading it as UTF-8 raised an error nothing caught. Files are read as UTF-8,
+else as Windows-1252. In all three scripts an unexpected fault in one
+repository is logged with its traceback and counted as failed, to be tried
+again next run, while the run goes on; Ctrl-C still stops it.
+
+</details>
+
+<details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/2ab04878bb0213573de51d5c28514f4719e45303">Create organizations whose GitHub website has no https://, and fix two false failures</a>. Thanks to xet7.</summary>
 
 EthKan's organization was refused (`422 [Website]: Url`) because its GitHub
