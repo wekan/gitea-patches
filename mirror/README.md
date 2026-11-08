@@ -68,6 +68,19 @@ from before - keeps its text and loses its files. A file from GitHub is download
 alone to WeKan's `.tools/tmp/github-to-gitea/`, uploaded to Gitea, and deleted, so at
 most one release file is on the disk at a time.
 
+**Freeing the local Gitea's disk.** github-to-gitea's menu item **10) Free Gitea's
+disk space** deletes release files from EVERY repository of the local Gitea the token
+can see - every one with an admin token - not only the configured sources:
+
+| Choice | What is deleted |
+|--------|-----------------|
+| 1) Keep newest release attachments, delete older | the files of every release but each repository's newest published one; drafts and the repositories in Releases kept in full are left alone |
+| 2) Delete all release attachments | every release file |
+
+The releases and their notes stay. It asks you to type `yes`, deletes nothing in a
+dry run, and prints how many files and gigabytes it freed. For cron:
+`./github-to-gitea.py --prune-release-files older` (or `all`), without asking.
+
 **Release files of any size into Gitea.** Two limits apply, and both can be lifted:
 
 - The scripts' setting `assets_max_mb`, read as Gitea reads `FILE_MAX_SIZE`: `-1` is

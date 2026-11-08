@@ -8,6 +8,10 @@ Actions workflows in Gitea Actions form, so that the release files are built loc
   ./github-to-gitea.py --all               every configured step for every source (cron)
   ./github-to-gitea.py issues releases     only these steps
   ./github-to-gitea.py --source wekan      only this source
+  ./github-to-gitea.py --prune-release-files older|all
+                                           free Gitea's disk: delete the release files of
+                                           every Gitea repository but the newest release's
+                                           (older), or all of them (all)
 
 Settings and sources are in github-to-gitea.ini (next to this file, mode 600).
 The source "wekan/wekan" imports one repository. The source "wekan" (an organization)
@@ -421,21 +425,24 @@ def set_releases_all(items):
     CFG.set("releases_all", "list", "\n" + "\n".join(items) if items else "")
 
 
-def keeps_all_releases():
+def keeps_all_releases(full=None, private=None):
     """True when the repository is in "Releases kept in full": (all), (allpublic) or
     (allprivate) by its visibility, its owner (organization or user) or owner/name -
-    GitHub's names, in any case."""
-    full, owner = GITHUB_REPO.lower(), GITHUB_REPO.split("/", 1)[0].lower()
+    in any case. Without arguments, the current GitHub repository, whose visibility
+    is asked from GitHub when needed."""
+    full = (full or GITHUB_REPO).lower()
+    owner = full.split("/", 1)[0]
     for item in releases_all():
         v = item.lower()
         if v == "(all)" or v == full or v == owner:
             return True
         if v in ("(allpublic)", "(allprivate)"):
-            try:
-                private = bool(repo_info().get("private"))
-            except LookupError:
-                continue
-            if private == (v == "(allprivate)"):
+            if private is None:
+                try:
+                    private = bool(repo_info().get("private"))
+                except LookupError:
+                    continue
+            if bool(private) == (v == "(allprivate)"):
                 return True
     return False
 
@@ -1843,6 +1850,90 @@ def run(steps, only=None):
     return not failed
 
 
+# --- freeing Gitea's disk space ----------------------------------------------------
+
+PRUNE_MODES = {"older": "keep the newest release's files, delete the files of older releases",
+               "all": "delete the files of every release"}
+
+
+def gitea_repos():
+    """Every repository of the local Gitea the token can see - every one with an admin
+    token - not only the configured sources."""
+    seen, page = set(), 1
+    while True:
+        s, d = gitea("GET", f"/repos/search?limit=50&page={page}")
+        if s != 200:
+            raise RepoError(f"Gitea /repos/search: {s} {d}")
+        items = (d or {}).get("data") or []
+        new = [r for r in items if r["full_name"] not in seen]
+        if not new:
+            return
+        for r in new:
+            seen.add(r["full_name"])
+            yield r
+        page += 1
+
+
+def prune_release_files(mode):
+    """Deletes release files from every repository of the local Gitea, to free its
+    disk; the releases and their notes stay. mode "older" keeps the files of each
+    repository's newest published release and of drafts, and leaves the repositories
+    in "Releases kept in full" alone - the next sync would only bring their files
+    back; mode "all" deletes every release file. Dry run deletes nothing."""
+    if mode not in PRUNE_MODES:
+        raise ValueError(mode)
+    log(f"Freeing Gitea's disk: {PRUNE_MODES[mode]}, in every repository of {opt('url', 'gitea')}"
+        + (" (dry run: nothing is deleted)" if DRY else ""))
+    files = size = repos = failed = 0
+    for repo in gitea_repos():
+        full = repo["full_name"]
+        if mode == "older" and keeps_all_releases(full, repo.get("private")):
+            log(f"  {full}: in Releases kept in full; left as it is")
+            continue
+        rels = list(gt_all("/releases", repo=full))  # Gitea lists the newest first
+        if mode == "older":
+            published = [r for r in rels if not r.get("draft")]
+            rels = published[1:]
+        doomed = [(r, a) for r in rels for a in r.get("assets") or []]
+        if not doomed:
+            continue
+        repos += 1
+        for r, a in doomed:
+            what = f"{full} {r['tag_name']}/{a['name']} ({(a.get('size') or 0) // 1048576} MB)"
+            if DRY:
+                log(f"    [dry-run] delete {what}")
+            else:
+                st, d = gitea("DELETE", f"/releases/{r['id']}/assets/{a['id']}", repo=full)
+                if st not in (200, 204):
+                    log(f"  {what}: not deleted: {st} {d}")
+                    failed += 1
+                    continue
+                log(f"  deleted {what}")
+            files += 1
+            size += a.get("size") or 0
+    log(f"{'Would delete' if DRY else 'Deleted'} {files} release file(s), {size / 1073741824:.1f} GB, "
+        f"in {repos} repositories" + (f"; {failed} could not be deleted." if failed else "."))
+    return not failed
+
+
+def menu_prune():
+    print("\nFree Gitea's disk space: release files of EVERY repository in this Gitea")
+    print("  (the releases and their notes stay; only their files are deleted)")
+    print(f"  1) Keep newest release attachments, delete older"
+          f"{' (Releases kept in full are left alone)' if releases_all() else ''}")
+    print("  2) Delete all release attachments")
+    print("  0) Back")
+    c = ask("Choice")
+    mode = {"1": "older", "2": "all"}.get(c)
+    if not mode:
+        return
+    apply_config()
+    if not DRY and ask(f"This deletes files from Gitea: {PRUNE_MODES[mode]}. Type yes to go on").lower() != "yes":
+        print("Nothing deleted.")
+        return
+    prune_release_files(mode)
+
+
 # --- menu --------------------------------------------------------------------
 
 def ask(prompt, default=""):
@@ -2024,6 +2115,7 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  7) Convert a local .github/workflows to Gitea Actions (a check, no Gitea)
  8) Help: Gitea Actions runners and variables
  9) Releases kept in full: which organizations, users or repositories keep every release
+10) Free Gitea's disk space: delete release attachments of every Gitea repository
  0) Quit""")
         c = ask("Choice")
         try:
@@ -2060,6 +2152,8 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
                 print(ACTIONS_HELP)
             elif c == "9":
                 menu_releases_all()
+            elif c == "10":
+                menu_prune()
         except SystemExit as e:
             print(e)
         except KeyboardInterrupt:
@@ -2194,12 +2288,18 @@ def main():
                                     "(allpublic) / (allprivate)) instead of the configured sources")
     p.add_argument("--restart", action="store_true",
                    help="do not resume an interrupted run: process every repository again")
+    p.add_argument("--prune-release-files", choices=sorted(PRUNE_MODES), metavar="older|all",
+                   help="free Gitea's disk: delete the release files of every Gitea repository - "
+                        "older: all but the newest release's, all: every one - and exit")
     p.add_argument("--convert-only", nargs=2, metavar=("SRC", "DST"),
                    help="only convert a local .github/workflows (SRC) into DST, no Gitea")
     a = p.parse_args()
     global RESTART
     RESTART = a.restart
     load_config()
+    if a.prune_release_files:
+        apply_config()
+        sys.exit(0 if prune_release_files(a.prune_release_files) else 1)
     if a.convert_only:
         select_repo(a.source if a.source and "/" in a.source else "wekan/wekan")
         convert_local(*a.convert_only)

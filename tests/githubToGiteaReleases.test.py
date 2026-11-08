@@ -18,6 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location("g2g", os.path.join(ROOT, "mirror", "github-to-gitea", "github-to-gitea.py"))
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
+real_gt_all = g.gt_all
 failures = 0
 
 
@@ -149,6 +150,80 @@ with contextlib.redirect_stdout(io.StringIO()) as out:
     g.menu_releases_all()
 check("the menu adds, refuses a duplicate or a bad name, and removes", g.releases_all() == ["wekan/wekan"])
 check("negative: what the menu refused is said", out.getvalue().count("Not valid, or already in the list.") == 2)
+
+# Freeing Gitea's disk: the release files of EVERY Gitea repository, "older" keeping
+# the newest published release's (and drafts', and every file of a repository in
+# Releases kept in full), "all" deleting every one. The releases stay.
+def prune(mode, dry=False, releases_all="", answer=None):
+    repos = {"wekan/wekan": False, "xet7/neonnoir": False, "xet7/secret": True, "xet7/empty": False}
+    rels = {full: [{"id": 10 * i + j, "tag_name": t, "draft": t == "draft",
+                    "assets": [{"id": 100 * i + 10 * j + k, "name": f"{t}-{k}.zip", "size": 1 << 30} for k in (1, 2)]}
+                   for j, t in enumerate(("draft", "v3", "v2", "v1"))]
+            for i, full in enumerate(repos)}
+    rels["xet7/empty"] = []
+    deleted = []
+
+    def gitea(method, path, body=None, repo=None, **kw):
+        if path.startswith("/repos/search"):
+            page = int(path.rsplit("page=", 1)[1])
+            items = [{"full_name": f, "private": p} for f, p in repos.items()]
+            return 200, {"data": items if page == 1 else items}  # Gitea's last page repeats nothing new
+        if method == "GET" and path.startswith("/releases"):
+            page = int(path.rsplit("page=", 1)[1])
+            return 200, rels[repo] if page == 1 else []
+        if method == "DELETE":
+            deleted.append((repo, path))
+            return 204, None
+        return 404, {}
+
+    g.gitea = gitea
+    g.gt_all = real_gt_all
+    g.DRY = dry
+    g.CFG = configparser.ConfigParser(interpolation=None)
+    g.CFG.read_dict({"releases_all": {"list": releases_all}})
+    if answer is None:
+        ok = g.prune_release_files(mode)
+    else:
+        answers = iter(answer)
+        g.ask = lambda prompt, default="": next(answers)
+        g.apply_config = lambda: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.menu_prune()
+        ok = True
+    return ok, deleted
+
+
+ok, dl = prune("older")
+kept = {"v3-1.zip", "v3-2.zip", "draft-1.zip", "draft-2.zip"}
+names = {p.rsplit("/", 1)[1] for _, p in dl}
+check("older: every Gitea repository loses the files of its older releases",
+      ok and {r for r, _ in dl} == {"wekan/wekan", "xet7/neonnoir", "xet7/secret"} and len(dl) == 3 * 4)
+check("negative: older keeps the newest published release's files and drafts' files",
+      not any(f"/releases/{10 * i + j}/" in p for i in range(4) for j in (0, 1) for _, p in dl))
+ok, dl = prune("all")
+check("all: every release file of every repository is deleted, drafts' too", ok and len(dl) == 3 * 8)
+ok, dl = prune("older", releases_all="xet7")
+check("negative: older leaves a repository in Releases kept in full alone",
+      {r for r, _ in dl} == {"wekan/wekan"})
+ok, dl = prune("older", releases_all="(allprivate)")
+check("Releases kept in full by visibility uses Gitea's, asking GitHub nothing", "xet7/secret" not in {r for r, _ in dl})
+ok, dl = prune("all", releases_all="(all)")
+check("all deletes also in Releases kept in full", len(dl) == 3 * 8)
+ok, dl = prune("all", dry=True)
+check("negative: a dry run deletes nothing", dl == [])
+ok, dl = prune("all", answer=["2", "no"])
+check("negative: the menu deletes nothing unless yes is typed", dl == [])
+ok, dl = prune("older", answer=["1", "yes"])
+check("the menu: 1 and yes keeps the newest release's files", len(dl) == 3 * 4)
+ok, dl = prune("all", answer=["2", "YES"])
+check("the menu: 2 and yes deletes every release file", len(dl) == 3 * 8)
+ok, dl = prune("all", answer=["0"])
+check("negative: 0 goes back without deleting", dl == [])
+try:
+    g.prune_release_files("newest")
+    check("negative: an unknown mode is refused", False)
+except ValueError:
+    check("negative: an unknown mode is refused", True)
 
 # The old default none becomes github once, in an ini file from before
 # release_assets_keep; none chosen after that stays none.
