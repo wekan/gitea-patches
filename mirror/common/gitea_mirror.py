@@ -142,16 +142,31 @@ def start_screen_log(here, name):
     out = open(path, "ab", buffering=0)
     lock = threading.Lock()
     saved, threads = [], []
+    shared = {}  # (device, inode) of a destination -> the pipe's write end going to it
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
             fd = stream.fileno()
+            dest = os.fstat(fd)
         except (AttributeError, OSError, ValueError):
             continue
         original = os.dup(fd)
+        key = (dest.st_dev, dest.st_ino)
+        if key in shared:
+            # stderr goes where stdout goes - the terminal, usually: through the SAME
+            # pipe, so a child's "out" then "err" stay in that order. Two pipes, read by
+            # two threads, could swap them.
+            os.dup2(shared[key], fd)
+            saved.append((fd, original))
+            try:
+                stream.reconfigure(line_buffering=True)
+            except (AttributeError, ValueError):
+                pass
+            continue
         r, w = os.pipe()
         os.dup2(w, fd)
         os.close(w)
+        shared[key] = fd
 
         def copy(r=r, original=original):
             while True:

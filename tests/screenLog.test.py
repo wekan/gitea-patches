@@ -45,7 +45,9 @@ for label, script in SCRIPTS.items():
     d = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
     env = dict(os.environ, MIRROR_LOG_DIR=d)
     for _ in range(2):
-        subprocess.run([sys.executable, "-I", "-c", RUN, script, d], capture_output=True, check=True, env=env)
+        # stderr where stdout goes, as on a terminal
+        subprocess.run([sys.executable, "-I", "-c", RUN, script, d], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, check=True, env=env)
     logs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "probe", "*.txt")))
     check(f"{label}: the log is <log>/mirror/<script>/YYYY-MM-DD_HH-MM-SS.txt",
           len(logs) >= 1 and all(NAME.match(n) for n in logs))
@@ -54,6 +56,15 @@ for label, script in SCRIPTS.items():
     lines = text.splitlines()
     check(f"{label}: Python's lines, a child's stdout and stderr, in the order shown",
           lines[1:] == ["first from python", "child-out", "child-err", "last, no newline"])
+    # stdout and stderr to different places: each still reaches its own place, and the
+    # log has every line (their order across the two is not defined then).
+    d2 = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+    r = subprocess.run([sys.executable, "-I", "-c", RUN, script, d2], capture_output=True, check=True,
+                       env=dict(os.environ, MIRROR_LOG_DIR=d2), text=True)
+    text2 = open(glob.glob(os.path.join(d2, "probe", "*.txt"))[0], encoding="utf-8").read()
+    check(f"{label}: stdout and stderr apart: each to its own place, all in the log",
+          "child-out" in r.stdout and "child-err" in r.stderr and "child-err" not in r.stdout
+          and all(x in text2 for x in ("first from python", "child-out", "child-err", "last, no newline")))
 
 # WeKan's place on each operating system.
 import importlib.util
