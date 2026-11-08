@@ -309,6 +309,16 @@ request limit lifted.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/66d9c35e7a204464bd5ddb66bea091e31b0b7498">github-to-gitea's gh repo sync uses gh's own login, not the settings file's token</a>. Thanks to xet7.</summary>
+
+gh prefers `GITHUB_TOKEN` to its own login, and the script had put `[github]
+token` there, so forks whose upstream changed `.github/workflows` were refused
+for the `workflow` scope even after `gh auth refresh -s workflow`. gh is now
+started without the token variables.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
