@@ -167,6 +167,31 @@ a string whose `%`-verbs or HTML tags differ from the English.
 
 </details>
 
+**Release files of any size** - in Gitea and in the mirror scripts, by default.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/2cb9185b50fbf937bb92861a9e6ee198c7e37789">Gitea takes release files of any size by default</a>. Thanks to xet7.</summary>
+
+The first code patch in `dist/all/`: `[repository.release] FILE_MAX_SIZE` is
+`-1`, no limit, by default (it was 2048 MB), and `-1` now works where upstream
+refused every file with it - an API upload streamed as
+`application/octet-stream`, whose `http.MaxBytesReader` takes a negative limit
+as 0, and the upload form, whose Dropzone refuses every file with a negative
+`maxFilesize` and applies 256 MiB without one. Go tests and a vitest cover it;
+the upload test fails without the fix.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/4c16bbb5ff73bb6b44f53dd0901b1faf282d9d14">The mirror scripts copy release files of any size by default</a>. Thanks to xet7.</summary>
+
+`assets_max_mb` is `0`, no limit, by default in github-to-gitea (it was 2048)
+and in gitea-to-gitlab and gitea-to-sourceforge (5000). A settings file with
+the old default gets `0` once, recorded under `[migrations]`, so a limit chosen
+after that stays.
+
+</details>
+
 and fixes the following bugs:
 
 **Mirroring** - github-to-gitea's errors in a run of 942 repositories.
