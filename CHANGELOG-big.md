@@ -153,7 +153,10 @@ log - and Gitea's "Create a new pull request" push messages are not shown.
 in for GitHub and Gitea. And Gitea's paging
 [ends on a page that brings nothing new](https://github.com/wekan/gitea-patches/commit/ef874664d6e5fdcb3a091c607ac532996c302979):
 Gitea ignores page for an issue's comments with `?since=`, and a run went on to
-page 83636 of one comment.
+page 83636 of one comment. Gitea's bare repository is
+[found by its lower-case path](https://github.com/wekan/gitea-patches/commit/ec05cda01d5f6b42edb199178401f63fcea8e08d),
+as Gitea keeps it: the git step skipped every repository with a capital letter
+in its owner or name, such as xet7/NEONnoir.
 
 </details>
 
