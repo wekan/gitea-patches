@@ -87,6 +87,50 @@ check("negative: a head that is not the API's commit is not pushed",
 # Negative: a PR GitHub does not have fails, it does not crash the run.
 check("negative: a missing PR ref returns False", g.push_pr_head(99, head, "github-pr/99") is False)
 
+# create_pull: a commit Gitea does not have is pushed at once - no POST /branches,
+# which would only write a 500 to Gitea's log - and git's remote: lines are not shown.
+calls, shown = [], []
+work2 = os.path.join(TMP, "work")
+git("checkout", "-q", "-b", "pr10", cwd=work2)
+git("-c", "user.name=U", "-c", "user.email=u@example.org", "commit", "-q", "--allow-empty", "-m", "PR 10", cwd=work2)
+head10 = git("rev-parse", "HEAD", cwd=work2)
+git("push", "-q", github, f"{head10}:refs/pull/10/head", cwd=work2)
+
+
+def gitea_api(method, p, body=None, **kw):
+    calls.append((method, p))
+    if p.startswith("/git/commits/"):
+        r = subprocess.run(["git", "-C", gitea, "cat-file", "-e", p.split("/")[3].split("?")[0]], capture_output=True)
+        return (200 if r.returncode == 0 else 404), None
+    if p.startswith("/branches/"):
+        return branch_in_gitea(method, p)
+    if method == "POST" and p == "/pulls":
+        return 201, {"number": 10}
+    return 500, {"message": "unexpected " + method + " " + p}
+
+
+# Like Gitea, the stand-in answers a push with "Create a new pull request for ...".
+hook = os.path.join(gitea, "hooks", "post-receive")
+with open(hook, "w") as fh:
+    fh.write("#!/bin/sh\necho \"Create a new pull request for 'github-pr/10':\" >&2\n")
+os.chmod(hook, 0o755)
+probe = subprocess.run(["git", "-C", work2, "push", gitea, "main:refs/heads/probe"], capture_output=True, text=True)
+check("the stand-in Gitea does print remote: lines", "remote: Create a new pull request" in probe.stderr)
+git("update-ref", "-d", "refs/heads/probe", cwd=gitea)
+g.gt = gitea_api
+g.gh = lambda path, params=None: {"title": "PR 10", "body": "", "user": {"login": "u"}, "created_at": "2026-11-08T00:00:00Z",
+                                 "html_url": "https://github.com/wekan/wekan/pull/10", "head": {"sha": head10},
+                                 "base": {"ref": "main"}, "labels": [], "milestone": None}
+g.label_ids = lambda labels: []
+g.milestone_id = lambda ms: 0
+g.find_bare = lambda path=None: None
+g.log = shown.append
+g.create_pull(10)
+check("create_pull pushes a missing commit and makes the PR", ("POST", "/pulls") in calls and
+      git("rev-parse", "refs/heads/github-pr/10", cwd=gitea) == head10)
+check("negative: no POST /branches for a commit Gitea does not have", ("POST", "/branches") not in calls)
+check("negative: Gitea's remote: lines are not shown", not any("remote:" in str(m) for m in shown))
+
 print()
 print(f"{failures} failure(s)")
 sys.exit(1 if failures else 0)

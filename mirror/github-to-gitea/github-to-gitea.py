@@ -703,8 +703,13 @@ def push_pr_head(num, sha, branch):
         if DRY:
             log(f"    [dry-run] git push {gitea_git_url()} {sha}:refs/heads/{branch}")
             return True
-        subprocess.run(["git", "-C", cache, "push", "--quiet", gitea_git_url(), f"{sha}:refs/heads/{branch}"],
-                       check=True, env=git_auth_env(os.environ["GITEA_TOKEN"]))
+        # Gitea answers a push with "Create a new pull request for ..."; the PR is made
+        # here anyway, so git's output is shown only when the push fails.
+        r = subprocess.run(["git", "-C", cache, "push", "--quiet", gitea_git_url(), f"{sha}:refs/heads/{branch}"],
+                           env=git_auth_env(os.environ["GITEA_TOKEN"]), capture_output=True, text=True)
+        if r.returncode != 0:
+            log((r.stdout + r.stderr).rstrip())
+            raise subprocess.CalledProcessError(r.returncode, r.args)
     except (subprocess.CalledProcessError, OSError) as e:
         log(f"  PR #{num}: pushing the head commit to Gitea failed: {e}")
         return False
@@ -717,8 +722,15 @@ def create_pull(num):
     branch = f"github-pr/{num}"
     s, _ = gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))
     if s != 200:
-        s, d = gt("POST", "/branches", {"new_branch_name": branch, "old_ref_name": pr["head"]["sha"]})
-        if s != 201 and not DRY and not (find_bare() is None and push_pr_head(num, pr["head"]["sha"], branch)):
+        sha = pr["head"]["sha"]
+        # Without the bare repository here, a commit Gitea does not have is pushed at
+        # once: asking Gitea to make a branch of it first only writes a 500 to its log.
+        has_commit = gt("GET", f"/git/commits/{sha}?stat=false&verification=false&files=false")[0] == 200
+        if not has_commit and find_bare() is None and not DRY:
+            s, d = (201, None) if push_pr_head(num, sha, branch) else (404, "the push did not work")
+        else:
+            s, d = gt("POST", "/branches", {"new_branch_name": branch, "old_ref_name": sha})
+        if s != 201 and not DRY:
             fail(f"PR #{num}: head commit {pr['head']['sha'][:10]} is missing from the Gitea repository ({s} {d}),\n"
                      f"and pushing it from GitHub did not work either (see above). Run the script on the machine "
                      f"that has Gitea's bare repository (setting bare_repo), or with a Gitea token that may push. "
