@@ -360,6 +360,19 @@ The answer's state is checked, and an earlier hand-made token moves to
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/b2a81c76b19a36c12c045d0c4713d0662c5648e3">gitea-to-sourceforge signs in with the OAuth2 application's own redirect URL</a>. Thanks to xet7.</summary>
+
+SourceForge refused the sign-in with "Mismatching redirect URI": the script
+sent `https://localhost/`, and SourceForge takes a redirect URL only exactly as
+the application registered it. `redirect_uri` is now empty by default and then
+not sent, so SourceForge uses the application's first registered redirect URL
+in both the authorization and the code exchange; a settings file with the old
+default gets the empty value once. Pasting nothing, or the sign-in address
+itself, is refused with what to paste instead.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
