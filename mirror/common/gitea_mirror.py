@@ -797,7 +797,8 @@ class Engine:
         if not releases:
             return
         # Gitea lists the newest first.
-        n = None if self.cfg.keeps_all_releases(repo) else self.cfg.keep_count()
+        full_list = self.cfg.keeps_all_releases(repo)
+        n = None if full_list else self.cfg.keep_count()
         keep = {r["tag_name"] for r in (releases if n is None else releases[:n])}
         log(f"Releases: {len(releases)}" + (", kept in full." if n is None else
                                              f"; the {'newest' if n == 1 else f'{n} newest'} synced."))
@@ -820,7 +821,24 @@ class Engine:
                         self.t.create_release(target, r, self.release_notes(repo, r))
                         self.record("copied", f"release {full} {tag}")
                         have = self.t.release_files(target, r) or set()
-                for a in r.get("assets") or []:
+                assets = r.get("assets") or []
+                if not full_list:
+                    names = [a["name"] for a in assets]
+                    wanted, newest = newest_version_files(names)
+                    if newest:
+                        log(f"  {tag}: {len(names)} files of several versions; only version {newest}'s, {len(wanted)} files")
+                        assets = [a for a in assets if a["name"] in wanted]
+                        older = sorted(self.t.asset_name(x) for x in set(names) - wanted
+                                       if self.t.asset_name(x) in have)
+                        if older:
+                            if self.dry:
+                                for f in older:
+                                    self.record("planned", f"delete {full} {tag}/{f} (an older version)")
+                            else:
+                                self.t.delete_files(target, r, older)
+                                for f in older:
+                                    self.record("deleted", f"{full} {tag}/{f} (an older version)")
+                for a in assets:
                     if self.t.asset_name(a["name"]) in have:
                         continue
                     if limit is not None and (limit == 0 or a.get("size", 0) > limit):
@@ -1009,6 +1027,31 @@ class Engine:
             return self.run([s for s in STEPS], only)
         finally:
             self.force_dry = False
+
+
+VERSION_IN_NAME = re.compile(r"\d+(?:\.\d+)+")
+
+
+def newest_version_files(names):
+    """The names to keep of one release's files. A release like rustdesk's nightly
+    holds the same files over and over with different version numbers -
+    rustdesk-1.2.0-x86_64.deb ... rustdesk-1.4.3-x86_64.deb, 352 files of 20
+    versions. When a file name, its version number taken out, appears with more than
+    one version, only the files of the newest version in the release are kept, and
+    files without a version number. Any other release keeps every file.
+    Returns (names to keep, the newest version or None)."""
+    versions = {}
+    for n in names:
+        m = VERSION_IN_NAME.search(n)
+        if m:
+            versions[n] = (tuple(int(x) for x in m.group().split(".")), n[:m.start()] + "\0" + n[m.end():])
+    seen = {}
+    for v, stem in versions.values():
+        seen.setdefault(stem, set()).add(v)
+    if not any(len(vs) > 1 for vs in seen.values()):
+        return set(names), None
+    newest = max(v for v, _ in versions.values())
+    return {n for n in names if n not in versions or versions[n][0] == newest}, ".".join(map(str, newest))
 
 
 # --- the menu ------------------------------------------------------------------------------

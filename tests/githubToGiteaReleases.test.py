@@ -225,6 +225,51 @@ try:
 except ValueError:
     check("negative: an unknown mode is refused", True)
 
+# A release of many versions - rustdesk's nightly: the same files with different version
+# numbers - gives only the newest version's files; any other release keeps them all.
+RUSTDESK = [f"rustdesk-{v}-{p}" for v in ("1.2.0", "1.3.9", "1.4.3", "1.4.2") for p in
+            ("x86_64.deb", "aarch64.apk", "x86_64-unknown-linux-gnu-ubuntu-18.04.deb")] + ["rustdesk-1.2.0-0.x86_64.rpm", "SHA256SUMS"]
+keep, newest = g.newest_version_files(RUSTDESK)
+check("many versions: only the newest version's files, and files without a version",
+      newest == "1.4.3" and keep == {"rustdesk-1.4.3-x86_64.deb", "rustdesk-1.4.3-aarch64.apk",
+                                     "rustdesk-1.4.3-x86_64-unknown-linux-gnu-ubuntu-18.04.deb", "SHA256SUMS"})
+check("versions compare as numbers, not text: 1.10.0 is newer than 1.9.0",
+      g.newest_version_files(["a-1.9.0.zip", "a-1.10.0.zip"]) == ({"a-1.10.0.zip"}, "1.10.0"))
+for names in (["app-1.0.zip", "lib-2.0.zip", "README"], ["weddy-v3.zip", "weddy-v3.tar.gz"],
+              ["wekan-8.12-amd64.zip", "wekan-8.12-arm64.zip"], ["ubuntu-18.04.deb", "ubuntu-20.04.iso"], []):
+    check(f"negative: {names or 'no files'} is no release of many versions, every file kept",
+          g.newest_version_files(names) == (set(names), None))
+
+
+def nightly(have, releases_all=""):
+    calls = []
+    g.CFG = configparser.ConfigParser(interpolation=None)
+    g.CFG.read_dict({"options": {"release_assets": "github", "release_assets_keep": "newest", "assets_max_mb": "-1"},
+                     "releases_all": {"list": releases_all}})
+    g.GITHUB_REPO, g.DRY = "xet7/rustdesk", False
+    g._info.clear()
+    g._info["xet7/rustdesk"] = {"fork": True, "parent": None, "private": False}
+    g.gh_all = lambda path, params=None: iter([{"tag_name": "nightly", "name": "nightly", "body": "", "draft": False,
+                                                "prerelease": False, "assets": [{"name": n, "url": "u/" + n, "size": 1}
+                                                                                for n in RUSTDESK]}])
+    g.gt_all = lambda path, repo=None: iter([{"id": 7, "tag_name": "nightly", "name": "nightly", "body": "", "draft": False,
+                                              "prerelease": False, "assets": [{"id": 70 + i, "name": n} for i, n in enumerate(have)]}])
+    g.gitea = lambda m, p, b=None, repo=None, **kw: (calls.append((m, p)), (204, None))[1]
+    g.gt = lambda m, p, b=None, **kw: (calls.append((m, p)), (200, {}))[1]
+    uploads = []
+    g.upload_asset = lambda cur, tag, name, path, url, size=0: uploads.append(name)
+    g.sync_releases()
+    return uploads, [p for m, p in calls if m == "DELETE"]
+
+
+up, dl = nightly(have=["rustdesk-1.2.0-x86_64.deb", "rustdesk-1.4.3-x86_64.deb"])
+check("github-to-gitea: a release of many versions uploads only the newest version's missing files",
+      sorted(up) == ["SHA256SUMS", "rustdesk-1.4.3-aarch64.apk", "rustdesk-1.4.3-x86_64-unknown-linux-gnu-ubuntu-18.04.deb"])
+check("github-to-gitea: an older version's file already in Gitea is deleted, the newest's stays",
+      dl == ["/releases/7/assets/70"])
+up, dl = nightly(have=["rustdesk-1.2.0-x86_64.deb"], releases_all="xet7/rustdesk")
+check("negative: Releases kept in full keeps every version", len(up) == len(RUSTDESK) - 1 and dl == [])
+
 # The old default none becomes github once, in an ini file from before
 # release_assets_keep; none chosen after that stays none.
 ini = os.path.join(TMP, "github-to-gitea.ini")

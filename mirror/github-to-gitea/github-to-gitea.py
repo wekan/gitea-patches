@@ -1176,14 +1176,42 @@ def keep_count():
     return max(0, int(v))
 
 
-def delete_assets(cur, tag):
-    """The files of a release outside release_assets_keep go from Gitea."""
+VERSION_IN_NAME = re.compile(r"\d+(?:\.\d+)+")
+
+
+def newest_version_files(names):
+    """The names to keep of one release's files. A release like rustdesk's nightly
+    holds the same files over and over with different version numbers -
+    rustdesk-1.2.0-x86_64.deb ... rustdesk-1.4.3-x86_64.deb, 352 files of 20
+    versions. When a file name, its version number taken out, appears with more than
+    one version, only the files of the newest version in the release are kept, and
+    files without a version number. Any other release keeps every file.
+    Returns (names to keep, the newest version or None)."""
+    versions = {}
+    for n in names:
+        m = VERSION_IN_NAME.search(n)
+        if m:
+            versions[n] = (tuple(int(x) for x in m.group().split(".")), n[:m.start()] + "\0" + n[m.end():])
+    seen = {}
+    for v, stem in versions.values():
+        seen.setdefault(stem, set()).add(v)
+    if not any(len(vs) > 1 for vs in seen.values()):
+        return set(names), None
+    newest = max(v for v, _ in versions.values())
+    return {n for n in names if n not in versions or versions[n][0] == newest}, ".".join(map(str, newest))
+
+
+def delete_assets(cur, tag, names=None, why="an older release"):
+    """The files of a release outside release_assets_keep go from Gitea - or only the
+    named ones."""
     for a in cur.get("assets") or []:
+        if names is not None and a["name"] not in names:
+            continue
         if DRY:
             log(f"    [dry-run] delete {tag}/{a['name']}")
             continue
         s, d = gitea("DELETE", f"/releases/{cur['id']}/assets/{a['id']}", repo=f"{OWNER}/{NAME}")
-        log(f"  {tag}: {a['name']} " + ("deleted (an older release)" if s in (200, 204) else f"not deleted: {s} {d}"))
+        log(f"  {tag}: {a['name']} " + (f"deleted ({why})" if s in (200, 204) else f"not deleted: {s} {d}"))
 
 
 def upstream_newest_release():
@@ -1252,7 +1280,18 @@ def sync_releases():
         if cur and cur.get("id") and opt("release_assets").strip().lower() != "none":
             if tag in keep:
                 have = {a["name"] for a in cur.get("assets") or []}
-                for item in asset_files(tag, r):
+                items = asset_files(tag, r)
+                if not full:
+                    names = [i[0] for i in items]
+                    wanted, newest = newest_version_files(names)
+                    if newest:
+                        log(f"  {tag}: {len(names)} files of several versions; only version {newest}'s, "
+                            f"{len(wanted)} files (Releases kept in full keeps them all)")
+                        items = [i for i in items if i[0] in wanted]
+                        older = set(names) - wanted
+                        if have & older:
+                            delete_assets(cur, tag, older, "an older version")
+                for item in items:
                     if item[0] not in have:
                         upload_asset(cur, tag, *item)
             else:

@@ -495,6 +495,7 @@ class FakeOld(Fake):
         self.gl_releases["v1"] = {"tag_name": "v1"}
         self.gl_links["v1"] = [{"id": 71, "name": "v1.zip"}]
         self.packages = [{"id": 81, "name": "wekan", "version": "v1"}, {"id": 82, "name": "wekan", "version": "v3x"}]
+        self.package_files = {81: [{"id": 91, "file_name": "v1.zip"}]}
         self.deleted = []
 
     def gitlab(self, method, path, q, j, body):
@@ -503,6 +504,9 @@ class FakeOld(Fake):
             return 204, None, {}
         if path == "/projects/9/packages":
             return self.page([p for p in self.packages if p["name"] == q.get("package_name")], q, 100)
+        m = re.fullmatch(r"/projects/9/packages/(\d+)/package_files", path)
+        if m:
+            return self.page(self.package_files.get(int(m.group(1)), []), q, 100)
         if path == "/projects/9" and method == "PUT":
             self.put_project = j
             return 200, {}, {}
@@ -542,6 +546,27 @@ e7.cfg.set("options", "dry_run", "yes")
 e7.configure()
 e7.run(["releases"], "wekan/wekan")
 check("negative: a dry run deletes nothing", f7.deleted == [])
+
+# A release of many versions: only the newest version's files are copied, and an older
+# version's file already at GitLab loses its link and its package file - not the package.
+check("gitea-to-*: the same version detection as github-to-gitea",
+      gm.newest_version_files(["r-1.2.0-a.deb", "r-1.4.3-a.deb", "r-1.4.3-b.apk", "SUMS"]) ==
+      ({"r-1.4.3-a.deb", "r-1.4.3-b.apk", "SUMS"}, "1.4.3"))
+fv = FakeOld()
+fv.releases = [{"id": 5, "tag_name": "nightly", "name": "nightly", "body": "", "draft": False, "published_at": "2020",
+                "html_url": f"{GITEA}/wekan/wekan/releases/tag/nightly",
+                "assets": [{"name": n, "size": 3} for n in ("r-1.2.0-a.deb", "r-1.4.3-a.deb", "r-1.4.3-b.apk")]}]
+fv.gl_releases["nightly"] = {"tag_name": "nightly"}
+fv.gl_links["nightly"] = [{"id": 72, "name": "r-1.2.0-a.deb"}]
+fv.packages = [{"id": 83, "name": "wekan", "version": "nightly"}]
+fv.package_files = {83: [{"id": 93, "file_name": "r-1.2.0-a.deb"}, {"id": 94, "file_name": "r-1.4.3-a.deb"}]}
+ev = engine(fv, os.path.join(TMP, "glv"))
+ev.run(["releases"], "wekan/wekan")
+check("gitea-to-*: only the newest version's files are copied",
+      sorted(l["name"] for l in fv.gl_links["nightly"]) == ["r-1.2.0-a.deb", "r-1.4.3-a.deb", "r-1.4.3-b.apk"]
+      and "/projects/9/releases/nightly/assets/links/72" in fv.deleted)
+check("gitea-to-*: an older version's package file is deleted, not the whole package",
+      "/projects/9/packages/83/package_files/93" in fv.deleted and "/projects/9/packages/83" not in fv.deleted)
 
 # The menu: add, refuse a duplicate and a bad name, remove.
 answers = iter(["a", "(ALL)", "a", "http://gitea.test/wekan/wekan.git", "a", "Wekan/Wekan", "a", "bad name!", "r", "1", "0"])

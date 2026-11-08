@@ -315,21 +315,35 @@ class GitLab:
         ver = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._+-]", "-", r["tag_name"])).strip(".-") or "0"
         return pkg, ver
 
+    @staticmethod
+    def package_file_name(name):
+        return re.sub(r"[^A-Za-z0-9._+~-]", "_", name)
+
     def delete_files(self, target, r, names):
-        """An older release's files: its asset links, and the generic package version
-        that holds them. The release and its notes stay."""
+        """Files of a release - all of an older release's, or an older version's in a
+        release of many versions: their asset links, and their files in the generic
+        package version that holds them (the package version too, once it is empty).
+        The release and its notes stay."""
         pid, tag = target["pid"], enc(r["tag_name"])
         for link in self.pages(f"/projects/{pid}/releases/{tag}/assets/links"):
             if link["name"] in names:
                 self.ok("DELETE", f"/projects/{pid}/releases/{tag}/assets/links/{link['id']}", want=(200, 204))
+        files = {self.package_file_name(n) for n in names}
         pkg, ver = self.package_of(target, r)
         for p in self.pages(f"/projects/{pid}/packages?package_type=generic&package_name={enc(pkg)}"):
-            if p.get("name") == pkg and p.get("version") == ver:
+            if p.get("name") != pkg or p.get("version") != ver:
+                continue
+            pfs = list(self.pages(f"/projects/{pid}/packages/{p['id']}/package_files"))
+            if all(f.get("file_name") in files for f in pfs):
                 self.ok("DELETE", f"/projects/{pid}/packages/{p['id']}", want=(200, 204))
+                continue
+            for f in pfs:
+                if f.get("file_name") in files:
+                    self.ok("DELETE", f"/projects/{pid}/packages/{p['id']}/package_files/{f['id']}", want=(200, 204))
 
     def upload_file(self, target, r, name, path):
         pkg, ver = self.package_of(target, r)
-        fname = re.sub(r"[^A-Za-z0-9._+~-]", "_", name)
+        fname = self.package_file_name(name)
         where = f"/projects/{target['pid']}/packages/generic/{enc(pkg)}/{enc(ver)}/{enc(fname)}"
         self.ok("PUT", where, body=gm.FileBody(path), timeout=None)
         self.ok("POST", f"/projects/{target['pid']}/releases/{enc(r['tag_name'])}/assets/links",

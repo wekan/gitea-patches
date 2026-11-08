@@ -68,6 +68,18 @@ from before - keeps its text and loses its files. A file from GitHub is download
 alone to WeKan's `.tools/tmp/github-to-gitea/`, uploaded to Gitea, and deleted, so at
 most one release file is on the disk at a time.
 
+**A release of many versions** - like rustdesk's `nightly`, which holds the same
+files over and over with different version numbers (`rustdesk-1.2.0-x86_64.deb` ...
+`rustdesk-1.4.3-x86_64.deb`: 352 files, 9.5 GB) - is recognised when a file name, its
+version number taken out, appears with more than one version. Then only the newest
+version's files are copied (for rustdesk 24 files, 780 MB), with the files that have no
+version number, and an older version's files already at the destination are deleted.
+Versions compare as numbers (1.10 is newer than 1.9). A release whose files share one
+version, or whose differently numbered files have different names, keeps every file,
+and so does every repository in Releases kept in full. All three scripts do this; on
+GitLab only those files' links and package files are deleted, not the release's
+package.
+
 **Freeing the local Gitea's disk.** github-to-gitea's menu item **10) Free Gitea's
 disk space** deletes release files from EVERY repository of the local Gitea the token
 can see - every one with an admin token - not only the configured sources:
