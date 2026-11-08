@@ -231,6 +231,17 @@ implementations and the place on each operating system.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/7261ea4a4df91aadafc72e5cd5dd872f4ab6f5ec">github-to-gitea's assets_max_mb names Gitea's real release file limit, and 0 is no limit</a>. Thanks to xet7.</summary>
+
+The setting said it matched Gitea's `[attachment] MAX_SIZE`, the limit of files
+attached to issues; release files are limited by `[repository.release]
+FILE_MAX_SIZE`, where `-1` is no limit. The README says how to lift both, and
+that a large file also needs room in Gitea's `TMPDIR` and a reverse proxy's
+request limit lifted.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
