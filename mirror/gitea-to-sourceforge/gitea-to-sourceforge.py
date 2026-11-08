@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Mirror repositories from the local Gitea to SourceForge: git branches and tags, issues
-and pull requests with their comments, and releases with their files.
+and pull requests with their comments, and releases with their files - by default the
+newest release only, every release for the repositories in the menu's "Releases kept in
+full".
 
   ./gitea-to-sourceforge.py                  menu: sources, settings, destinations, checks
   ./gitea-to-sourceforge.py --all            every configured step for every source (cron)
@@ -292,7 +294,7 @@ class SourceForge:
                   f"rename {quoted(dest + '.part')} {quoted(dest)}\n")
 
     def create_release(self, target, r, notes):
-        work = os.path.join(self.e.here, "work")
+        work = gm.mirror_tmp_dir(self.NAME)
         os.makedirs(work, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=work) as d:
             p = os.path.join(d, "README.md")
@@ -302,6 +304,13 @@ class SourceForge:
 
     def upload_file(self, target, r, name, path):
         self.put(target, r, name, path)
+
+    # The release's notes are its README.md: an older release keeps it, and loses the rest.
+    NOTES_FILES = ("README.md",)
+
+    def delete_files(self, target, r, names):
+        d = f"{target['parent']}/{gm.safe_segment(r['tag_name'])}"
+        self.sftp("".join(f"-rm {quoted(d + '/' + gm.safe_segment(n))}\n" for n in names))
 
     # avatars: SourceForge's REST API has no project icon - it is set in the project's
     # admin pages - so they are reported, once per run, not copied.

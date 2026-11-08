@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Mirror repositories from the local Gitea to GitLab: git branches and tags, the wiki,
 issues and pull requests with comments, labels and milestones, and releases with their
-files.
+files - by default the newest release only, every release for the repositories in the
+menu's "Releases kept in full".
 
   ./gitea-to-gitlab.py                      menu: sources, settings, destinations, checks
   ./gitea-to-gitlab.py --all                every configured step for every source (cron)
@@ -153,8 +154,19 @@ class GitLab:
         return handle["ssh_url_to_repo"] if self.mode == "ssh" else handle["http_url_to_repo"]
 
     def wiki_url(self, handle, repo):
-        if not handle.get("wiki_enabled", True):
-            return ""
+        """The project's wiki, turned on when it is off - a project made before the
+        Gitea repository had a wiki - so the copied wiki shows in its Wiki tab."""
+        if not handle.get("wiki_enabled", True) or handle.get("wiki_access_level") == "disabled":
+            if self.e.dry:
+                self.e.record("planned", f"turn on the wiki of GitLab project {handle.get('path_with_namespace')}")
+            else:
+                status, data, _ = self.call("PUT", f"/projects/{handle['id']}", {"wiki_access_level": "enabled"})
+                if status != 200:
+                    self.e.record("failed", f"wiki of {handle.get('path_with_namespace')}: not turned on: "
+                                            f"{status} {gm.message(data)}")
+                    return ""
+                handle["wiki_enabled"], handle["wiki_access_level"] = True, "enabled"
+                self.e.record("copied", f"wiki of GitLab project {handle.get('path_with_namespace')} turned on")
         return re.sub(r"\.git$", ".wiki.git", self.git_url(handle, repo))
 
     def git_env(self):
@@ -257,7 +269,7 @@ class GitLab:
 
     def upload_attachment(self, tracker, key):
         import urllib.request
-        d = os.path.join(self.e.here, "work", "tmp", uuid.uuid4().hex)
+        d = os.path.join(gm.mirror_tmp_dir(self.NAME), uuid.uuid4().hex)
         os.makedirs(d)
         try:
             req = urllib.request.Request(f"{self.e.gitea.base}/attachments/{key}", headers=self.e.gitea.headers())
@@ -297,9 +309,26 @@ class GitLab:
             body["released_at"] = r["published_at"]
         self.ok("POST", f"/projects/{target['pid']}/releases", body)
 
-    def upload_file(self, target, r, name, path):
+    @staticmethod
+    def package_of(target, r):
         pkg = re.sub(r"[^A-Za-z0-9._-]", "-", target["repo"]["name"]).strip(".-") or "release"
         ver = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._+-]", "-", r["tag_name"])).strip(".-") or "0"
+        return pkg, ver
+
+    def delete_files(self, target, r, names):
+        """An older release's files: its asset links, and the generic package version
+        that holds them. The release and its notes stay."""
+        pid, tag = target["pid"], enc(r["tag_name"])
+        for link in self.pages(f"/projects/{pid}/releases/{tag}/assets/links"):
+            if link["name"] in names:
+                self.ok("DELETE", f"/projects/{pid}/releases/{tag}/assets/links/{link['id']}", want=(200, 204))
+        pkg, ver = self.package_of(target, r)
+        for p in self.pages(f"/projects/{pid}/packages?package_type=generic&package_name={enc(pkg)}"):
+            if p.get("name") == pkg and p.get("version") == ver:
+                self.ok("DELETE", f"/projects/{pid}/packages/{p['id']}", want=(200, 204))
+
+    def upload_file(self, target, r, name, path):
+        pkg, ver = self.package_of(target, r)
         fname = re.sub(r"[^A-Za-z0-9._+~-]", "_", name)
         where = f"/projects/{target['pid']}/packages/generic/{enc(pkg)}/{enc(ver)}/{enc(fname)}"
         self.ok("PUT", where, body=gm.FileBody(path), timeout=None)

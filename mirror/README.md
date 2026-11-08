@@ -64,8 +64,19 @@ releases are deleted from Gitea; `release_assets_keep` can make that the N newes
 text and files: `(all)`, `(allpublic)`, `(allprivate)`, a GitHub organization or user
 (`wekan`), or one repository (`wekan/wekan`) - saved as `[releases_all] list` in
 `github-to-gitea.ini`. An older release already in Gitea - from the migration, or
-from before - keeps its text and loses its files. A file from GitHub is downloaded alone to WeKan's `.tools/tmp/github-to-gitea/`,
-uploaded to Gitea, and deleted, so at most one release file is on the disk at a time.
+from before - keeps its text and loses its files. A file from GitHub is downloaded
+alone to WeKan's `.tools/tmp/github-to-gitea/`, uploaded to Gitea, and deleted, so at
+most one release file is on the disk at a time.
+
+gitea-to-gitlab and gitea-to-sourceforge do the same, from Gitea: the same
+`release_assets_keep` setting (default `newest`), and the same menu item **9)
+Releases kept in full** with Gitea's organizations, users and repositories. An older
+release keeps its notes - on GitLab the release, on SourceForge its `README.md` - and
+its files are deleted: on GitLab its asset links and the generic package version that
+holds them, on SourceForge the files of its directory. A file is downloaded alone to
+WeKan's `.tools/tmp/<script>/` and deleted after it is copied. gitea-to-gitlab turns a
+GitLab project's wiki on when Gitea's wiki has pages and the project's wiki is off, so
+the copied wiki shows in its Wiki tab.
 
 github-to-gitea's step `git` also copies the wiki of every repository that has one
 on GitHub - also a wiki written after the migration, which copies it only once. Gitea

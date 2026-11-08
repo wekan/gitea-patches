@@ -41,6 +41,7 @@ def check(name, cond):
 
 gm.log = lambda msg="": None  # quiet
 TMP = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+os.environ["MIRROR_TMP_DIR"] = os.path.join(TMP, "mirror-tmp")
 GITEA = "http://gitea.test"
 
 # --- identities ----------------------------------------------------------------------------
@@ -217,6 +218,7 @@ class Fake:
 
 
 def engine(fake, here):
+    os.makedirs(here, exist_ok=True)
     gm.http = fake
     e = gm.Engine(gl_mod.GitLab(), here)
     e.cfg.load()
@@ -476,6 +478,130 @@ check("SourceForge: avatars are reported once as not possible, not failed", s.co
 s.counts = {}
 check("negative: SourceForge refuses a private repository", s.t.ensure_repo("wekan", fsf.repos["wekan/secret"]) is None
       and s.counts.get("skipped") == 1)
+
+# --- releases: only the newest, unless "Releases kept in full" lists the repository ----------
+def three_releases(f):
+    f.releases = [{"id": i, "tag_name": t, "name": t, "body": "", "draft": False, "published_at": "2020",
+                   "html_url": f"{GITEA}/wekan/wekan/releases/tag/{t}", "assets": [{"name": f"{t}.zip", "size": 3}]}
+                  for i, t in ((3, "v3"), (2, "v2"), (1, "v1"))]  # Gitea: newest first
+
+
+class FakeOld(Fake):
+    """GitLab already has v1 with its file, from an earlier run."""
+
+    def __init__(self):
+        super().__init__()
+        three_releases(self)
+        self.gl_releases["v1"] = {"tag_name": "v1"}
+        self.gl_links["v1"] = [{"id": 71, "name": "v1.zip"}]
+        self.packages = [{"id": 81, "name": "wekan", "version": "v1"}, {"id": 82, "name": "wekan", "version": "v3x"}]
+        self.deleted = []
+
+    def gitlab(self, method, path, q, j, body):
+        if method == "DELETE":
+            self.deleted.append(path)
+            return 204, None, {}
+        if path == "/projects/9/packages":
+            return self.page([p for p in self.packages if p["name"] == q.get("package_name")], q, 100)
+        if path == "/projects/9" and method == "PUT":
+            self.put_project = j
+            return 200, {}, {}
+        return super().gitlab(method, path, q, j, body)
+
+
+f3 = FakeOld()
+e3 = engine(f3, os.path.join(TMP, "gl3"))
+e3.run(["releases"], "wekan/wekan")
+check("GitLab: by default only the newest release is copied", sorted(f3.gl_releases) == ["v1", "v3"]
+      and [l["name"] for l in f3.gl_links["v3"]] == ["v3.zip"])
+check("GitLab: an older release's file link and package are deleted, the release stays",
+      sorted(f3.deleted) == ["/projects/9/packages/81", "/projects/9/releases/v1/assets/links/71"] and "v1" in f3.gl_releases)
+check("negative: another version's package is not deleted", "/projects/9/packages/82" not in f3.deleted)
+
+for item in ("wekan/wekan", "WEKAN", "(all)", "(allpublic)"):
+    f4 = FakeOld()
+    e4 = engine(f4, os.path.join(TMP, "gl4-" + re.sub(r"\W", "", item)))
+    e4.cfg.set_releases_all(["other", item])
+    e4.run(["releases"], "wekan/wekan")
+    check(f"GitLab: listed as {item}, every release is copied and nothing is deleted",
+          sorted(f4.gl_releases) == ["v1", "v2", "v3"] and f4.deleted == [])
+f5 = FakeOld()
+e5 = engine(f5, os.path.join(TMP, "gl5"))
+e5.cfg.set_releases_all(["(allprivate)", "wekan/wekan2", "wek"])
+e5.run(["releases"], "wekan/wekan")
+check("negative: (allprivate), a longer name and a shorter owner do not match", sorted(f5.gl_releases) == ["v1", "v3"])
+f6 = FakeOld()
+e6 = engine(f6, os.path.join(TMP, "gl6"))
+e6.cfg.set("options", "release_assets_keep", "2")
+e6.run(["releases"], "wekan/wekan")
+check("GitLab: release_assets_keep = 2 copies the two newest", sorted(f6.gl_releases) == ["v1", "v2", "v3"]
+      and "/projects/9/releases/v1/assets/links/71" in f6.deleted)
+f7 = FakeOld()
+e7 = engine(f7, os.path.join(TMP, "gl7"))
+e7.cfg.set("options", "dry_run", "yes")
+e7.configure()
+e7.run(["releases"], "wekan/wekan")
+check("negative: a dry run deletes nothing", f7.deleted == [])
+
+# The menu: add, refuse a duplicate and a bad name, remove.
+answers = iter(["a", "(ALL)", "a", "http://gitea.test/wekan/wekan.git", "a", "Wekan/Wekan", "a", "bad name!", "r", "1", "0"])
+real_ask = gm.ask
+gm.ask = lambda prompt, default="": next(answers)
+import contextlib
+import io
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    gm.menu_releases_all(e3)
+gm.ask = real_ask
+check("the menu adds, refuses a duplicate or a bad name, and removes", e3.cfg.releases_all() == ["wekan/wekan"])
+check("the list is saved in the settings file", "[releases_all]" in open(e3.ini, encoding="utf-8").read())
+
+# The GitLab wiki is turned on when it is off, so the copied wiki shows in the Wiki tab.
+gm.http = f3
+url = e3.t.wiki_url({"id": 9, "wiki_enabled": False, "path_with_namespace": "wekan/wekan", "ssh_url_to_repo": "g:wekan/wekan.git",
+                     "http_url_to_repo": "https://gitlab.test/wekan/wekan.git"}, f3.repos["wekan/wekan"])
+check("GitLab: a project's wiki that is off is turned on, and pushed to",
+      getattr(f3, "put_project", None) == {"wiki_access_level": "enabled"} and url.endswith(".wiki.git"))
+src = open(os.path.join(ROOT, "mirror", "common", "gitea_mirror.py"), encoding="utf-8").read()
+body = src[src.index("    def sync_git("):src.index("    # issues")]
+check("negative: the destination's wiki is turned on only after Gitea's wiki is found to have pages",
+      body.index("ls-remote") < body.index("self.t.wiki_url("))
+
+# SourceForge: an older release keeps README.md (its notes) and loses its files.
+fsf2 = FakeSF()
+three_releases(fsf2)
+fsf2.files["/home/frs/project/wekan/GitHub-releases/v1"] = ["README.md", "v1.zip"]
+gm.http = fsf2
+os.makedirs(os.path.join(TMP, "sf2"))
+s2 = gm.Engine(sf_mod.SourceForge(), os.path.join(TMP, "sf2"))
+s2.cfg.load()
+for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "sf"), ("sourceforge", "user", "wekan")):
+    s2.cfg.set(sec, k, v)
+s2.configure()
+s2.load_state()
+s2.download = e.download
+scripts.clear()
+fsf = fsf2
+s2.t.sftp = fake_sftp
+s2.run(["releases"], "wekan/wekan")
+rms = [x for x in scripts if x.startswith("-rm") and ".part" not in x]
+check("SourceForge: an older release's files are removed, its README.md stays",
+      rms == ['-rm "/home/frs/project/wekan/GitHub-releases/v1/v1.zip"\n'])
+check("SourceForge: only the newest release is uploaded",
+      not any("/v2/" in x for x in scripts if "put " in x) and any("/v3/v3.zip" in x for x in scripts if "put " in x))
+
+# A release file is downloaded to MIRROR_TMP_DIR (WeKan's .tools/tmp), never /tmp, and deleted.
+src_file = os.path.join(TMP, "asset.bin")
+open(src_file, "wb").write(b"abc")
+e8 = gm.Engine(gl_mod.GitLab(), os.path.join(TMP, "gl8"))
+e8.gitea = type("G", (), {"headers": lambda self: {}})()
+path = gm.Engine.download(e8, {"name": "../x.zip", "size": 3, "browser_download_url": "file://" + src_file})
+check("a release file is downloaded under MIRROR_TMP_DIR/<script>",
+      path.startswith(os.path.join(TMP, "mirror-tmp") + os.sep) and open(path, "rb").read() == b"abc")
+check("negative: a file name cannot climb out of the directory", os.path.basename(path) != ".." and "/../" not in path)
+os.environ.pop("MIRROR_TMP_DIR")
+check("without MIRROR_TMP_DIR, files go to WeKan's .tools/tmp/<script>",
+      gm.mirror_tmp_dir("gitea-to-gitlab").endswith(os.path.join(".tools", "tmp", "gitea-to-gitlab")))
+os.environ["MIRROR_TMP_DIR"] = os.path.join(TMP, "mirror-tmp")
 
 print(f"\n{failures} failure(s)")
 subprocess.run(["rm", "-rf", TMP])

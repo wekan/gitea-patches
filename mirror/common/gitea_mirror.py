@@ -17,7 +17,13 @@ WHAT IS COPIED, AND HOW IT STAYS IN STEP
             recognised and never copied twice. For a repository Gitea migrated from
             GitHub, URL is the GitHub address of the issue, exactly what WeKan's mirror
             used. Only what is missing is added; nothing at the destination is removed.
-  releases  each release that is missing, its notes, and every file it lacks.
+  releases  by default only the NEWEST release - its notes and its files - and the
+            files of older releases are deleted from the destination (setting
+            release_assets_keep: newest, all, or a number of newest releases). The
+            repositories in the menu's "Releases kept in full" list - (all),
+            (allpublic), (allprivate), an organization or user, or owner/name - get
+            every release, notes and files, and keep them all. A file is downloaded
+            alone to WeKan's .tools/tmp/<script>/, copied, and deleted.
   avatars   the avatar of each Gitea organization or user onto its destination, and a
             repository's avatar onto the repository there - uploaded again only when
             the image changes.
@@ -91,12 +97,10 @@ def normalize(text):
 
 # --- logging, like WeKan's releases/mirror.sh: everything also goes to a run log ----------
 
-def mirror_log_dir():
-    """<WeKan>/.tools/log/mirror: the WeKan checkout is at a fixed place on each operating
-    system - ~/repos/wekan on Linux, ~/Documents/repos/wekan on macOS and
-    Downloads/repos/wekan under the user's profile on Windows. MIRROR_LOG_DIR overrides it."""
-    if os.environ.get("MIRROR_LOG_DIR"):
-        return os.environ["MIRROR_LOG_DIR"]
+def wekan_tools_dir():
+    """<WeKan>/.tools: the WeKan checkout is at a fixed place on each operating system -
+    ~/repos/wekan on Linux, ~/Documents/repos/wekan on macOS and Downloads/repos/wekan
+    under the user's profile on Windows."""
     home = os.path.expanduser("~")
     if sys.platform.startswith("win"):
         wekan = os.path.join(os.environ.get("USERPROFILE", home), "Downloads", "repos", "wekan")
@@ -104,7 +108,20 @@ def mirror_log_dir():
         wekan = os.path.join(home, "Documents", "repos", "wekan")
     else:
         wekan = os.path.join(home, "repos", "wekan")
-    return os.path.join(wekan, ".tools", "log", "mirror")
+    return os.path.join(wekan, ".tools")
+
+
+def mirror_log_dir():
+    """<WeKan>/.tools/log/mirror. MIRROR_LOG_DIR overrides it."""
+    if os.environ.get("MIRROR_LOG_DIR"):
+        return os.environ["MIRROR_LOG_DIR"]
+    return os.path.join(wekan_tools_dir(), "log", "mirror")
+
+
+def mirror_tmp_dir(name):
+    """<WeKan>/.tools/tmp/<script>: where a release file is while it is copied - never
+    /tmp, which may be a small tmpfs. MIRROR_TMP_DIR overrides it."""
+    return os.environ.get("MIRROR_TMP_DIR") or os.path.join(wekan_tools_dir(), "tmp", name)
 
 
 def start_screen_log(here, name):
@@ -303,6 +320,8 @@ COMMON_SETTINGS = [
     ("options", "include_archived", "yes", "mirror archived repositories"),
     ("options", "wiki", "yes", "mirror the wiki, where the target has a git wiki"),
     ("options", "assets_max_mb", "5000", "largest release file to copy"),
+    ("options", "release_assets_keep", "newest", "releases synced, with their files, outside 'Releases kept in full': "
+                                                 "newest | all | N (the N newest); older ones lose their files"),
 ]
 
 
@@ -313,12 +332,13 @@ class Config:
         self.cfg.optionxform = str  # owner names keep their case
 
     def load(self):
-        sections = {s for s, *_ in self.settings} | {"sources", "destinations"}
+        sections = {s for s, *_ in self.settings} | {"sources", "destinations", "releases_all"}
         self.cfg.read_dict({s: {} for s in sections})
         if os.path.exists(self.path):
             self.cfg.read(self.path, encoding="utf-8")
-        if not self.cfg.has_option("sources", "list"):
-            self.cfg.set("sources", "list", "")
+        for section in ("sources", "releases_all"):
+            if not self.cfg.has_option(section, "list"):
+                self.cfg.set(section, "list", "")
         added = False
         for s, k, d, _ in self.settings:
             if not self.cfg.has_option(s, k):
@@ -354,6 +374,38 @@ class Config:
 
     def destinations(self):
         return dict(self.cfg.items("destinations")) if self.cfg.has_section("destinations") else {}
+
+    def releases_all(self):
+        """The menu's "Releases kept in full": the sources whose every release is
+        copied, notes and files, and keeps them all."""
+        return [s.strip() for s in self.cfg.get("releases_all", "list", fallback="").replace(",", "\n").split("\n")
+                if s.strip()]
+
+    def set_releases_all(self, items):
+        self.set("releases_all", "list", "\n" + "\n".join(items) if items else "")
+
+    def keeps_all_releases(self, repo):
+        """True when the Gitea repository is in "Releases kept in full": (all),
+        (allpublic) or (allprivate) by its visibility, its owner or owner/name - in any
+        case."""
+        full = repo["full_name"].lower()
+        owner = full.split("/", 1)[0]
+        for item in self.releases_all():
+            v = item.lower()
+            if v in ("(all)", full, owner):
+                return True
+            if v in ("(allpublic)", "(allprivate)") and bool(repo.get("private")) == (v == "(allprivate)"):
+                return True
+        return False
+
+    def keep_count(self):
+        """How many of the newest releases are synced with their files: None for all."""
+        v = self.get("release_assets_keep").strip().lower()
+        if v == "all":
+            return None
+        if v in ("", "newest"):
+            return 1
+        return max(1, int(v)) if v.isdigit() else 1
 
 
 # --- the Gitea source -----------------------------------------------------------------------
@@ -609,15 +661,18 @@ class Engine:
             return
         self.t.after_git(handle, repo)
         if self.cfg.flag("wiki") and repo.get("has_wiki"):
-            wiki_url = self.t.wiki_url(handle, repo)
-            if not wiki_url:
-                self.record("skipped", f"wiki {repo['full_name']}: {self.t.TITLE} has no git wiki")
-                return
+            # Gitea says has_wiki for every repository with the wiki turned on, written
+            # or not: only a wiki with pages is copied, and only then is it turned on at
+            # the destination.
             env = self.gitea.git_env()
             ls = subprocess.run(["git", "ls-remote", f"{self.gitea.base}/{repo['full_name']}.wiki.git"],
                                 capture_output=True, text=True, env=env)
             if ls.returncode or not ls.stdout.strip():
                 self.record("checked", f"wiki {repo['full_name']}: none in Gitea")
+                return
+            wiki_url = self.t.wiki_url(handle, repo)
+            if not wiki_url:
+                self.record("skipped", f"wiki {repo['full_name']}: {self.t.TITLE} has no git wiki")
                 return
             try:
                 self.push(self.work_repo(repo, wiki=True), wiki_url, f"wiki {repo['full_name']}")
@@ -720,13 +775,20 @@ class Engine:
         releases = [r for r in self.gitea.all(f"/repos/{full}/releases") if not r.get("draft")]
         if not releases:
             return
-        log(f"Releases: {len(releases)}.")
+        # Gitea lists the newest first.
+        n = None if self.cfg.keeps_all_releases(repo) else self.cfg.keep_count()
+        keep = {r["tag_name"] for r in (releases if n is None else releases[:n])}
+        log(f"Releases: {len(releases)}" + (", kept in full." if n is None else
+                                             f"; the {'newest' if n == 1 else f'{n} newest'} synced."))
         target = self.t.release_target(handle, repo)
         if target is None:
             return
         limit = int(self.cfg.get("assets_max_mb") or 0) * 1048576
         for r in reversed(releases):  # oldest first
             tag = r["tag_name"]
+            if tag not in keep:
+                self.drop_release_files(target, r, full)
+                continue
             try:
                 have = self.t.release_files(target, r)  # None = the release is missing
                 if have is None:
@@ -756,6 +818,27 @@ class Engine:
             except (LookupError, RuntimeError, OSError, subprocess.CalledProcessError) as e:
                 self.record("failed", f"release {full} {tag}: {e}")
 
+    def drop_release_files(self, target, r, full):
+        """An older release: not copied, and its files at the destination - from an
+        earlier run, or from WeKan's mirror - are deleted; its notes stay."""
+        tag = r["tag_name"]
+        try:
+            have = self.t.release_files(target, r)
+            if not have:
+                return
+            files = sorted(f for f in have if f not in getattr(self.t, "NOTES_FILES", ()))
+            if not files:
+                return
+            if self.dry:
+                for f in files:
+                    self.record("planned", f"delete {full} {tag}/{f} (an older release)")
+                return
+            self.t.delete_files(target, r, files)
+            for f in files:
+                self.record("deleted", f"{full} {tag}/{f} (an older release)")
+        except (LookupError, RuntimeError, OSError, subprocess.CalledProcessError) as e:
+            self.record("failed", f"release {full} {tag}: deleting the older release's files: {e}")
+
     def release_notes(self, repo, r):
         origin = github_origin(repo)
         url = f"{origin}/releases/tag/{urllib.parse.quote(r['tag_name'])}" if origin else self.gitea.public_link(r.get("html_url"))
@@ -763,7 +846,7 @@ class Engine:
                 f"Published: {r.get('published_at') or r.get('created_at') or ''}.")
 
     def download(self, asset):
-        d = os.path.join(self.here, "work", "tmp", uuid.uuid4().hex)
+        d = os.path.join(mirror_tmp_dir(self.t.NAME), uuid.uuid4().hex)
         os.makedirs(d)
         path = os.path.join(d, safe_segment(asset["name"]))
         req = urllib.request.Request(asset["browser_download_url"], headers=dict(self.gitea.headers(), **{"User-Agent": "gitea-mirror"}))
@@ -814,7 +897,7 @@ class Engine:
         if self.dry:
             self.record("planned", what)
             return
-        d = os.path.join(self.here, "work", "tmp", uuid.uuid4().hex)
+        d = os.path.join(mirror_tmp_dir(self.t.NAME), uuid.uuid4().hex)
         os.makedirs(d)
         try:
             path = os.path.join(d, "avatar" + image_extension(data))
@@ -1029,6 +1112,46 @@ def menu_settings(e):
             e.cfg.set(s, k, v)
 
 
+RELEASES_ALL_HELP = """\
+  Every release - notes and files - is copied and kept for the repositories listed here:
+    (all)         every repository
+    (allpublic)   every public repository / (allprivate) every private repository
+    org or user   every repository of a Gitea organization or user, e.g. wekan
+    owner/name    one repository, e.g. wekan/wekan
+  Every other repository gets only its newest release, notes and files, and the files of
+  its older releases are deleted from the destination (setting release_assets_keep)."""
+
+
+def menu_releases_all(e):
+    while True:
+        items = e.cfg.releases_all()
+        print("\nReleases kept in full:")
+        print(RELEASES_ALL_HELP + "\n\n  Listed:")
+        for i, s in enumerate(items, 1):
+            print(f" {i:2}) {s}")
+        if not items:
+            print("    (none - only the newest release is copied)")
+        print("  a) Add   r) Remove   0) Back")
+        c = ask("Choice").lower()
+        if c in ("", "0"):
+            return
+        if c == "a":
+            v = ask("(all) / (allpublic) / (allprivate), a Gitea organization or user, or owner/name").strip().strip("/")
+            v = re.sub(r"^https?://[^/]+/", "", v).removesuffix(".git")
+            if v.lower() in SPECIAL:
+                v = v.lower()
+            if v and v.lower() not in [x.lower() for x in items] and \
+                    (v in SPECIAL or re.fullmatch(r"[\w.-]+(/[\w.-]+)?", v)):
+                e.cfg.set_releases_all(items + [v])
+            elif v:
+                print("Not valid, or already in the list.")
+        elif c == "r":
+            n = ask("Number to remove")
+            if n.isdigit() and 1 <= int(n) <= len(items):
+                del items[int(n) - 1]
+                e.cfg.set_releases_all(items)
+
+
 def pick_source(e):
     items = e.cfg.sources()
     for i, s in enumerate(items, 1):
@@ -1055,6 +1178,7 @@ def menu(e):
 Gitea -> {t.TITLE}     Gitea: {e.cfg.get('url', 'gitea')}     {t.TITLE}: {t.where(e.cfg)}     settings: {os.path.basename(e.ini)}
 Sources: {', '.join(items) or '(none - add one with 3)'}
 Dry run: {'ON' if e.cfg.flag('dry_run') else 'off'}
+Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the newest release)'}
 
  1) Run every step ({', '.join(configured_steps(e))}) for every source
  2) Run chosen steps for a chosen source
@@ -1064,6 +1188,7 @@ Dry run: {'ON' if e.cfg.flag('dry_run') else 'off'}
  6) Dry run on / off
  7) Check Gitea and {t.TITLE} access (read-only)
  8) Check what is not mirrored yet (read-only)
+ 9) Releases kept in full: which organizations, users or repositories keep every release
  0) Quit""")
         c = ask("Choice")
         try:
@@ -1092,6 +1217,8 @@ Dry run: {'ON' if e.cfg.flag('dry_run') else 'off'}
                 e.check_online()
             elif c == "8":
                 e.check_missing(pick_source(e))
+            elif c == "9":
+                menu_releases_all(e)
         except SystemExit as err:
             print(err)
         except KeyboardInterrupt:
