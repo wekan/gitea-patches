@@ -296,13 +296,24 @@ def gt(method, path, body=None, **kw):
 
 
 def gt_all(path, repo=None):
+    """Every page. Stops on an empty page - and on a page that brings nothing new:
+    Gitea ignores page for some endpoints (an issue's comments with ?since=) and
+    answers every page with the same items, which was a loop without end."""
     sep = "&" if "?" in path else "?"
-    page = 1
+    seen, page = set(), 1
     while True:
         status, data = gitea("GET", f"{path}{sep}limit=50&page={page}", repo=repo or f"{OWNER}/{NAME}")
         if status != 200 or not data:
             return
-        yield from data
+        new = []
+        for item in data:
+            key = item.get("id", json.dumps(item, sort_keys=True)) if isinstance(item, dict) else json.dumps(item)
+            if key not in seen:
+                seen.add(key)
+                new.append(item)
+        if not new:
+            return
+        yield from new
         page += 1
 
 

@@ -131,6 +131,31 @@ check("create_pull pushes a missing commit and makes the PR", ("POST", "/pulls")
 check("negative: no POST /branches for a commit Gitea does not have", ("POST", "/branches") not in calls)
 check("negative: Gitea's remote: lines are not shown", not any("remote:" in str(m) for m in shown))
 
+# gt_all: Gitea ignores page for an issue's comments with ?since= and answers every
+# page with the same items - the run that asked for page 83636 of one comment.
+pages = []
+
+
+def same_every_page(method, p, body=None, repo=None, **kw):
+    pages.append(p)
+    if len(pages) > 1000:
+        raise RuntimeError("no end")
+    return 200, [{"id": 70220, "body": "hi"}]
+
+
+g.gitea = same_every_page
+got = list(g.gt_all("/issues/6880/comments?since=2026-11-07T18:48:25Z"))
+check("negative: a page that brings nothing new ends the paging", len(got) == 1 and len(pages) == 2)
+
+
+def real_pages(method, p, body=None, repo=None, **kw):
+    page = int(p.rsplit("page=", 1)[1])
+    return 200, [{"id": (page - 1) * 50 + i} for i in range(50)] if page <= 3 else []
+
+
+g.gitea = real_pages
+check("three full pages and an empty one are all read", [i["id"] for i in g.gt_all("/labels")] == list(range(150)))
+
 print()
 print(f"{failures} failure(s)")
 sys.exit(1 if failures else 0)
