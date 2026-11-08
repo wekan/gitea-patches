@@ -319,6 +319,15 @@ started without the token variables.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/1674844d06ef573f00ae01aaa357089ad3157349">The mirror scripts' screen log keeps a child's stdout and stderr in order</a>. Thanks to xet7.</summary>
+
+Two pipes read by two threads could swap a child's lines in the log, and
+`tests/screenLog.test.py` failed now and then. When stdout and stderr go to the
+same place they now share one pipe; the test runs as a terminal does.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
