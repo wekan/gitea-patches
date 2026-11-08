@@ -120,6 +120,20 @@ commit fetched from the upstream first (setting `fork_upstream_release`).
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/0bfa453d7527d4f0aa485ac5a7b9681f9d68234f">github-to-gitea's menu says which repositories keep every release; the others get only the newest</a>. Thanks to xet7.</summary>
+
+The menu's new item 9, Releases kept in full, lists the sources whose every
+release is synced, text and files, and keeps them all: `(all)`, `(allpublic)`,
+`(allprivate)`, a GitHub organization or user, or `owner/name` (saved as
+`[releases_all] list`). With nothing listed, a repository gets only its newest
+release, text and files, and the files of older releases are deleted from
+Gitea; an older release already there keeps its text.
+`tests/githubToGiteaReleases.test.py` covers each form, the menu and the
+negative cases.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
