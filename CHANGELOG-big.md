@@ -139,13 +139,14 @@ local repositories standing in for GitHub and Gitea.
 </details>
 
 <details>
-<summary><a href="https://github.com/wekan/gitea-patches/commit/90db9ec3161373013c3dfee9dedb27700f248dbe">Every mirror script writes what the screen shows to a log beside itself</a>. Thanks to xet7.</summary>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/42dd9f63774550b9050b7fda5fa367303a36746d">Every mirror script writes what the screen shows to WeKan's .tools/log/mirror/</a>. Thanks to xet7.</summary>
 
-`<script>_YYYY-MM-DD_HH-MM-SS-log.txt` in the script's own directory: its lines,
-the menu's prompts and the messages of git and the other programs it runs, in
-the screen's order and flushed before the program ends. `.gitignore` keeps
-`*log.txt` out of commits; `tests/screenLog.test.py` checks all three
-implementations.
+`.tools/log/mirror/<script>/YYYY-MM-DD_HH-MM-SS.txt` in WeKan's checkout -
+`~/repos/wekan` on Linux, `~/Documents/repos/wekan` on macOS,
+`Downloads\repos\wekan` on Windows: the script's lines, the menu's prompts and
+the messages of git and the other programs it runs, in the screen's order and
+flushed before the program ends. `tests/screenLog.test.py` checks all three
+implementations and the place on each operating system.
 
 </details>
 
