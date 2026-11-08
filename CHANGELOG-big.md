@@ -328,6 +328,21 @@ same place they now share one pipe; the test runs as a terminal does.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/5084850066a3f3dd0dd098771963bd22fc1a27e8">gitea-to-sourceforge uses SourceForge's REST API as its api-docs document it</a>. Thanks to xet7.</summary>
+
+Checked against <https://sourceforge.net/api-docs/>: tickets' `new` and `save`
+are now sent as `multipart/form-data`, not urlencoded; `private` and
+`discussion_disabled` as `true`/`false`, not Python's `True`/`False`; custom
+fields as `ticket_form.custom_fields._<name>`; and the ticket list is read at
+`/p/<project>/<tracker>` without a trailing slash. A token that is not
+hexadecimal, as the bearer tokens are, is refused before any request, and
+Check access asks `has_access?perm=admin` whether the token may administer the
+project, which creating Git and Tracker tools needs. Release files stay on
+sftp: the API has no file releases. `tests/mirror.test.py` checks each.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
