@@ -59,6 +59,9 @@ g.gh = fake_gh
 ran = []
 
 
+fail_with = None
+
+
 class Done:
     def __init__(self, rc=0, out=""):
         self.returncode, self.stdout, self.stderr = rc, out, ""
@@ -67,10 +70,14 @@ class Done:
 real_run = subprocess.run
 
 
+envs = []
+
+
 def fake_run(cmd, *a, **kw):
     if cmd and str(cmd[0]).endswith("gh"):
         ran.append(cmd)
-        return Done()
+        envs.append(kw.get("env"))
+        return Done(*fail_with) if fail_with else Done()
     return real_run(cmd, *a, **kw)
 
 
@@ -93,6 +100,19 @@ fork("behind", 0, 7)
 check("a fork behind its upstream with no commits of its own is synced with gh repo sync",
       ran == [["/usr/bin/gh", "repo", "sync", "xet7/rumble", "--source", "upstream/rumble", "--branch", "master"]])
 check("negative: never with --force", not any("--force" in c for c in ran))
+os.environ["GH_TOKEN"] = "gh-env-secret"
+fork("behind", 0, 7)
+check("gh runs with its own login: GITHUB_TOKEN and GH_TOKEN are not passed to it",
+      envs and envs[-1] is not None and not any(k in envs[-1] for k in ("GITHUB_TOKEN", "GH_TOKEN"))
+      and "PATH" in envs[-1])
+check("negative: the script's own environment keeps its token", os.environ.get("GITHUB_TOKEN") == "github-secret")
+del os.environ["GH_TOKEN"]
+fail_with = (1, "Upstream commits contain workflow changes, which require the `workflow` scope")
+shown.clear()
+fork("behind", 0, 7)
+check("a refusal for the workflow scope says it is gh's own login that needs it",
+      any("gh auth refresh -s workflow" in m and "gh's own login" in m for m in shown))
+fail_with = None
 fork("diverged", 2, 7)
 check("negative: a fork with commits of its own (diverged) is not synced", ran == [])
 fork("ahead", 3, 0)

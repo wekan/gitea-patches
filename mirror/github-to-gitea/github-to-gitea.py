@@ -691,6 +691,18 @@ def fork_parent():
     return (info.get("parent") or {}).get("full_name") if info.get("fork") else None
 
 
+GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def gh_own_login_env():
+    """The environment for the gh command, without the token variables: gh prefers
+    GH_TOKEN and GITHUB_TOKEN to its own login, and this script puts [github] token
+    in GITHUB_TOKEN - a token that may lack the workflow scope gh repo sync needs when
+    upstream changed .github/workflows. gh's own login (gh auth login, gh auth refresh
+    -s workflow) is the one that may write to the fork."""
+    return {k: v for k, v in os.environ.items() if k not in GH_TOKEN_VARS}
+
+
 def sync_fork_on_github():
     """A fork with no commits of its own, behind its upstream, is brought up to it on
     GitHub with `gh repo sync` - gh's own login, which already may write there - before
@@ -725,9 +737,12 @@ def sync_fork_on_github():
     if DRY:
         log("    [dry-run] " + " ".join(cmd[1:]))
         return
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=gh_own_login_env())
     if r.returncode != 0:
-        log(f"  gh repo sync failed: {(r.stdout + r.stderr).strip()}")
+        out = (r.stdout + r.stderr).strip()
+        log(f"  gh repo sync failed: {out}")
+        if "workflow" in out:
+            log("  (gh's own login - not [github] token - needs the workflow scope: gh auth refresh -s workflow)")
         return
     _info.pop(GITHUB_REPO, None)
     log(f"  {GITHUB_REPO} {branch} is now at {parent}'s.")

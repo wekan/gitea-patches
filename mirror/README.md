@@ -148,7 +148,10 @@ A repository that is a **fork on GitHub** gets two more things from github-to-gi
 
 - When it has no commits of its own and its upstream is newer, it is first brought up
   to the upstream **on GitHub**, with `gh repo sync <fork> --source <upstream> --branch
-  <default branch>` - the `gh` command's own login, which already may write there -
+  <default branch>` - the `gh` command's own login, which already may write there,
+  never `[github] token` (the token variables are not passed to gh, which would prefer
+  them); when upstream changed `.github/workflows`, that login needs the `workflow`
+  scope once: `gh auth refresh -s workflow` -
   and only then copied to Gitea. GitHub's compare API decides: a fork that is ahead of
   its upstream or has diverged from it is never synced, and `gh repo sync` runs without
   `--force`, so it only fast-forwards. Setting `sync_forks` (default `yes`).
