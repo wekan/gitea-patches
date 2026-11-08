@@ -106,6 +106,20 @@ fetched into it; otherwise it is pushed through a copy under `.tools/tmp`.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/454bcc08f314b6c4e8e02083b044fd861b226d0c">github-to-gitea syncs a GitHub fork with its upstream, and copies upstream's newest release</a>. Thanks to xet7.</summary>
+
+A fork with no commits of its own, whose upstream is newer, is first brought up
+to the upstream on GitHub with `gh repo sync` - gh's own login - and only then
+copied to Gitea. GitHub's compare API decides: a fork that is ahead or has
+diverged is never synced, and gh runs without `--force`, so it only
+fast-forwards (setting `sync_forks`). A fork with no releases of its own gets
+its upstream's newest published release, text and files, with the tag and its
+commit fetched from the upstream first (setting `fork_upstream_release`).
+`tests/githubToGiteaFork.test.py` covers both, with the negative cases.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
