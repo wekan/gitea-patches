@@ -1611,7 +1611,80 @@ Gitea Actions (step actions):
 """
 
 
+
+# --- the screen's log ---------------------------------------------------------------------
+
+def start_screen_log(here, name):
+    """Everything this run shows on the screen - its own lines, its prompts and the
+    output of the git and other programs it runs - also goes to
+    <here>/<name>_YYYY-MM-DD_HH-MM-SS-log.txt, beside the script. Copied at the file
+    descriptors, so a child process's messages are in it too, and flushed to the file
+    before the program ends."""
+    import atexit
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(here, f"{name}_{stamp}-log.txt")
+    n = 0
+    while os.path.exists(path):
+        n += 1
+        path = os.path.join(here, f"{name}_{stamp}-{n}-log.txt")
+    out = open(path, "ab", buffering=0)
+    lock = threading.Lock()
+    saved, threads = [], []
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+            fd = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            continue
+        original = os.dup(fd)
+        r, w = os.pipe()
+        os.dup2(w, fd)
+        os.close(w)
+
+        def copy(r=r, original=original):
+            while True:
+                try:
+                    data = os.read(r, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with lock:
+                    try:
+                        os.write(original, data)
+                    except OSError:
+                        pass
+                    out.write(data)
+            os.close(r)
+
+        try:  # a pipe is block-buffered: keep Python's lines in step with its children's
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+        t = threading.Thread(target=copy, daemon=True)
+        t.start()
+        saved.append((fd, original))
+        threads.append(t)
+
+    def finish():
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        for fd, original in saved:
+            os.dup2(original, fd)  # closes the pipe's last writer: the copier sees the end
+        for t in threads:
+            t.join(timeout=5)
+        out.close()
+
+    atexit.register(finish)
+    print(f"Log: {path}", flush=True)
+    return path
+
+
 def main():
+    start_screen_log(HERE, "github-to-gitea")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("steps", nargs="*", metavar="step",
                    help=f"{', '.join(STEPS)}; with no steps, in a terminal, the menu opens")

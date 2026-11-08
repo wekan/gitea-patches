@@ -11,7 +11,8 @@ files.
   ./gitea-to-gitlab.py --check-missing      read-only: what is not mirrored yet
 
 Settings are in gitea-to-gitlab.ini next to this file (mode 600, holds tokens), the
-progress in gitea-to-gitlab-state.json, and every run's log in log/<date-time>/.
+progress in gitea-to-gitlab-state.json, and every run's log beside this file as
+gitea-to-gitlab_YYYY-MM-DD_HH-MM-SS-log.txt.
 
 GITLAB
   - A Gitea repository owner/name goes to <namespace>/name at GitLab: the namespace is

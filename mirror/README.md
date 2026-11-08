@@ -9,8 +9,10 @@
 All three have the same menu (run every step, run chosen steps, sources, settings, dry
 run) and the same command line (`--all`, `--source`, steps, `--restart`). The two Gitea
 scripts also have WeKan's `releases/mirror.sh` checks - **Check access** and **Check
-what is not mirrored yet**, both read-only - a Destinations menu, and a log of every
-run in `log/<date-time>/`, like `releases/mirror.sh`'s `.tools/log/mirror/`.
+what is not mirrored yet**, both read-only - and a Destinations menu. Every script
+here writes what a run shows on the screen - git's messages included - also to
+`<script>_YYYY-MM-DD_HH-MM-SS-log.txt` beside itself; `.gitignore` keeps those
+out of commits.
 
 ```sh
 cd mirror/gitea-to-gitlab

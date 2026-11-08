@@ -11,3 +11,5 @@ mirror/gitea-to-*/log/
 mirror/gitea-to-*/work/
 # github-to-gitea: its git cache of pull request heads pushed to Gitea.
 mirror/github-to-gitea/tmp/
+# Every run's log beside its script: <name>_YYYY-MM-DD_HH-MM-SS-log.txt.
+*log.txt
