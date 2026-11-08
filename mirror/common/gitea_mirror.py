@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1017,6 +1018,11 @@ class Engine:
                 log("\nInterrupted. The next run with the same steps and sources continues from here.")
                 interrupted = True
                 break
+            except Exception as e:  # a fault in one repository must not stop the others
+                log(f"  ERROR: {type(e).__name__}: {e}")
+                for line in traceback.format_exc().rstrip().splitlines():
+                    log(f"    {line}")
+                failed.append((full, f"{type(e).__name__}: {e}"))
         if not interrupted:
             self.state["_run"]["finished"] = now_iso()
             self.save_state()

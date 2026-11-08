@@ -73,6 +73,7 @@ import sys
 import threading
 import time
 import urllib.error
+import traceback
 import urllib.parse
 import urllib.request
 import uuid
@@ -1464,7 +1465,16 @@ def raw_file(path, ref="main"):
     url = f"{GITEA_URL.rsplit('/api', 1)[0]}/{OWNER}/{NAME}/raw/branch/{ref}/{urllib.parse.quote(path)}"
     req = urllib.request.Request(url, headers={"Authorization": f"token {os.environ['GITEA_TOKEN']}"})
     with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read().decode()
+        return decode_text(r.read())
+
+
+def decode_text(data):
+    """A file's text: UTF-8, else Windows-1252 - an old editor's en dash is 0x96 -
+    with any byte that is neither shown as U+FFFD, never an exception."""
+    try:
+        return data.decode()
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
 
 
 def sync_actions(state):
@@ -1895,6 +1905,11 @@ def run(steps, only=None):
             log("\nInterrupted. The next run with the same steps and sources continues from here.")
             interrupted = True
             break
+        except Exception as e:  # a fault in one repository must not stop the others
+            log(f"  ERROR: {type(e).__name__}: {e}")
+            for line in traceback.format_exc().rstrip().splitlines():
+                log(f"    {line}")
+            failed.append((full, f"{type(e).__name__}: {e}"))
     if not interrupted:
         STORE["_run"]["finished"] = now_iso()
         save_state()

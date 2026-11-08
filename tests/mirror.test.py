@@ -876,6 +876,31 @@ for value, want in (("-1", ["v3.zip"]), ("0", []), ("1", [])):
     check(f"gitea-to-*: assets_max_mb = {value} copies {want or 'no file'} of 5 MB",
           [l["name"] for l in fz.gl_links.get("v3", [])] == want)
 
+# --- a fault in one repository does not stop the run -----------------------------------------
+here_err = os.path.join(TMP, "errors")
+er = engine(Fake(), here_err)
+er.expand = lambda src: ["o/one", "o/broken", "o/three"]
+ran = []
+logged = []
+real_log = gm.log
+gm.log = lambda msg="": logged.append(str(msg))
+
+
+def run_repo(full, steps):
+    ran.append(full)
+    if full == "o/broken":
+        b"\x96".decode()
+
+
+er.run_repo = run_repo
+ok = er.run(["git"], "o")
+gm.log = real_log
+check("gitea-to-*: the run goes on after a repository with an unexpected fault",
+      ran == ["o/one", "o/broken", "o/three"] and ok is False)
+check("... reported with its traceback, and tried again next run",
+      any("o/broken: UnicodeDecodeError" in x for x in logged) and any("Traceback" in x for x in logged)
+      and "o/broken" not in er.state["_run"]["done"])
+
 print(f"\n{failures} failure(s)")
 subprocess.run(["rm", "-rf", TMP])
 sys.exit(1 if failures else 0)
