@@ -39,7 +39,11 @@ STEPS
             comments. If a pull request cannot be made a real one, the repository stops
             instead of making it an issue (the numbers would get out of step).
   releases  missing releases, with the tag on the right commit; files according to the
-            setting release_assets (none / local / github).
+            setting release_assets (github / local / none). By default only the
+            newest release keeps its files (setting release_assets_keep: newest, all,
+            or a number of newest releases); the files of older ones are deleted
+            from Gitea. A file from GitHub is downloaded alone to WeKan's
+            .tools/tmp/github-to-gitea/, uploaded to Gitea, and deleted.
   actions   .github/workflows -> branch actions_branch (main + .gitea/workflows + .gitea/gh).
             See the menu item "Help: Gitea Actions".
   avatars   the avatar of each GitHub organization or user onto its Gitea organization
@@ -93,7 +97,8 @@ SETTINGS = [
     ("options", "include_archived", "yes", "import the archived repositories of an organization or user"),
     ("options", "wiki", "yes", "import the wiki in the migration"),
     ("options", "lfs", "yes", "import Git LFS files in the migration"),
-    ("options", "release_assets", "none", "release files: none | local (assets_dir) | github (download from GitHub)"),
+    ("options", "release_assets", "github", "release files: github (download from GitHub) | local (assets_dir) | none"),
+    ("options", "release_assets_keep", "newest", "releases that keep their files: newest | all | N (the N newest); the files of older releases are deleted from Gitea"),
     ("options", "assets_dir", "", "directory <tag>/<files> (release_assets = local); {owner} {name} allowed"),
     ("options", "assets_max_mb", "2048", "largest file to upload (Gitea's [attachment] MAX_SIZE)"),
     ("options", "bare_repo", "~/gitea/data/gitea-repositories/{owner}/{name}.git",
@@ -348,6 +353,12 @@ def load_config():
     if os.path.exists(INI_FILE):
         CFG.read(INI_FILE, encoding="utf-8")
     added = False
+    # release_assets was "none" by default before release_assets_keep existed: a file
+    # from then has none only as that old default, and gets the new one, github.
+    if not CFG.has_option("options", "release_assets_keep") and \
+            CFG.get("options", "release_assets", fallback="none").strip() == "none":
+        CFG.set("options", "release_assets", "github")
+        added = True
     for s, k, d, _ in SETTINGS:
         if not CFG.has_option(s, k):
             CFG.set(s, k, d)
@@ -915,24 +926,32 @@ NO_AUTH_REDIRECT = urllib.request.build_opener(_DropAuthOnRedirect)
 
 
 def upload_asset(cur, tag, name, path, url, size=0):
+    """One file to the Gitea release. A file from GitHub is downloaded alone to
+    mirror_tmp_dir(), uploaded, and deleted - also when the upload fails - so at most
+    one release file is on the disk at a time."""
     limit = int(opt("assets_max_mb") or 0) * 1024 * 1024
     if DRY:
         log(f"    [dry-run] upload {tag}/{name}")
         return
-    tmpdir = None
+    downloaded = None
     if path is None:
         if limit and size > limit:
             log(f"  {tag}: {name} skipped ({size // 1048576} MB > assets_max_mb)")
             return
-        tmpdir = os.path.join(HERE, "tmp", f"github-to-gitea-{os.getpid()}")
+        tmpdir = mirror_tmp_dir()
         os.makedirs(tmpdir, exist_ok=True)
-        path = os.path.join(tmpdir, name)
+        # The name is GitHub's: its last path element only, never a path.
+        downloaded = path = os.path.join(tmpdir, f"{os.getpid()}-{os.path.basename(name) or 'file'}")
         req = urllib.request.Request(url, headers={"Accept": "application/octet-stream",
                                                    "Authorization": f"token {os.environ['GITHUB_TOKEN']}",
                                                    "User-Agent": "github-to-gitea"})
-        with NO_AUTH_REDIRECT.open(req, timeout=None) as resp, open(path, "wb") as f:
-            while chunk := resp.read(1 << 20):
-                f.write(chunk)
+        try:
+            with NO_AUTH_REDIRECT.open(req, timeout=None) as resp, open(path, "wb") as f:
+                while chunk := resp.read(1 << 20):
+                    f.write(chunk)
+        except BaseException:
+            _remove(downloaded)
+            raise
     elif limit and os.path.getsize(path) > limit:
         log(f"  {tag}: {name} skipped (over assets_max_mb)")
         return
@@ -941,14 +960,45 @@ def upload_asset(cur, tag, name, path, url, size=0):
                      repo=f"{OWNER}/{NAME}", stream=Body(path, "attachment"), timeout=None)
         log(f"  {tag}: {name} " + ("uploaded" if s == 201 else f"ERROR {s} {d}"))
     finally:
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        if downloaded:
+            _remove(downloaded)
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def keep_count():
+    """How many of the newest releases keep their files: None for all."""
+    v = opt("release_assets_keep").strip().lower()
+    if v == "all":
+        return None
+    if v in ("", "newest"):
+        return 1
+    return max(0, int(v))
+
+
+def delete_assets(cur, tag):
+    """The files of a release outside release_assets_keep go from Gitea."""
+    for a in cur.get("assets") or []:
+        if DRY:
+            log(f"    [dry-run] delete {tag}/{a['name']}")
+            continue
+        s, d = gitea("DELETE", f"/releases/{cur['id']}/assets/{a['id']}", repo=f"{OWNER}/{NAME}")
+        log(f"  {tag}: {a['name']} " + ("deleted (an older release)" if s in (200, 204) else f"not deleted: {s} {d}"))
 
 
 def sync_releases():
     existing = {r["tag_name"]: r for r in gt_all("/releases")}
     gh_rel = list(gh_all(f"repos/{GITHUB_REPO}/releases"))
     log(f"Releases: {len(existing)} in Gitea, {len(gh_rel)} on GitHub.")
+    # GitHub lists the newest first; a draft is no release yet.
+    published = [r["tag_name"] for r in gh_rel if not r.get("draft")]
+    n = keep_count()
+    keep = set(published if n is None else published[:n])
     for r in reversed(gh_rel):  # vanhin ensin
         tag = r["tag_name"]
         want = {"tag_name": tag, "name": r.get("name") or tag, "body": r.get("body") or "",
@@ -968,11 +1018,14 @@ def sync_releases():
                 cur.get("prerelease") != want["prerelease"] or cur.get("draft") != want["draft"]:
             gt("PATCH", f"/releases/{cur['id']}", want)
             log(f"  {tag}: release updated")
-        if cur and cur.get("id"):
-            have = {a["name"] for a in cur.get("assets") or []}
-            for item in asset_files(tag, r):
-                if item[0] not in have:
-                    upload_asset(cur, tag, *item)
+        if cur and cur.get("id") and opt("release_assets").strip().lower() != "none":
+            if tag in keep:
+                have = {a["name"] for a in cur.get("assets") or []}
+                for item in asset_files(tag, r):
+                    if item[0] not in have:
+                        upload_asset(cur, tag, *item)
+            else:
+                delete_assets(cur, tag)
 
 
 # --- 5. GitHub Actions -> Gitea Actions ------------------------------------------
@@ -1484,7 +1537,10 @@ def menu_settings():
                     print(f"Unknown step: {', '.join(bad)}. Steps: {', '.join(STEPS)}")
                     continue
             if k == "release_assets" and v not in ("none", "local", "github"):
-                print("The value is none, local or github.")
+                print("The value is github, local or none.")
+                continue
+            if k == "release_assets_keep" and not (v in ("newest", "all") or (v.isdigit() and int(v) > 0)):
+                print("The value is newest, all, or how many of the newest releases (1, 2, 3...).")
                 continue
             CFG.set(s, k, v)
             save_config()
@@ -1567,7 +1623,7 @@ def menu():
         print(f"""
 GitHub -> Gitea     Gitea: {opt('url', 'gitea')}     settings: {os.path.basename(INI_FILE)}
 Sources: {', '.join(items) or '(none - add one with 3)'}
-Dry run: {'ON' if flag('dry_run') else 'off'}   Replace wrongly imported: {'yes' if flag('replace_broken') else 'no'}   Release files: {opt('release_assets')}
+Dry run: {'ON' if flag('dry_run') else 'off'}   Replace wrongly imported: {'yes' if flag('replace_broken') else 'no'}   Release files: {opt('release_assets')} ({opt('release_assets_keep')})
 
  1) Run every step ({opt('steps')}) for every source
  2) Run chosen steps for a chosen source
@@ -1637,12 +1693,10 @@ Gitea Actions (step actions):
 
 # --- the screen's log ---------------------------------------------------------------------
 
-def mirror_log_dir():
-    """<WeKan>/.tools/log/mirror: the WeKan checkout is at a fixed place on each operating
-    system - ~/repos/wekan on Linux, ~/Documents/repos/wekan on macOS and
-    Downloads/repos/wekan under the user's profile on Windows. MIRROR_LOG_DIR overrides it."""
-    if os.environ.get("MIRROR_LOG_DIR"):
-        return os.environ["MIRROR_LOG_DIR"]
+def wekan_tools_dir():
+    """<WeKan>/.tools: the WeKan checkout is at a fixed place on each operating system -
+    ~/repos/wekan on Linux, ~/Documents/repos/wekan on macOS and Downloads/repos/wekan
+    under the user's profile on Windows."""
     home = os.path.expanduser("~")
     if sys.platform.startswith("win"):
         wekan = os.path.join(os.environ.get("USERPROFILE", home), "Downloads", "repos", "wekan")
@@ -1650,7 +1704,20 @@ def mirror_log_dir():
         wekan = os.path.join(home, "Documents", "repos", "wekan")
     else:
         wekan = os.path.join(home, "repos", "wekan")
-    return os.path.join(wekan, ".tools", "log", "mirror")
+    return os.path.join(wekan, ".tools")
+
+
+def mirror_log_dir():
+    """<WeKan>/.tools/log/mirror (wekan_tools_dir). MIRROR_LOG_DIR overrides it."""
+    if os.environ.get("MIRROR_LOG_DIR"):
+        return os.environ["MIRROR_LOG_DIR"]
+    return os.path.join(wekan_tools_dir(), "log", "mirror")
+
+
+def mirror_tmp_dir():
+    """<WeKan>/.tools/tmp/github-to-gitea: where a release file from GitHub is while it
+    is uploaded. MIRROR_TMP_DIR overrides it."""
+    return os.environ.get("MIRROR_TMP_DIR") or os.path.join(wekan_tools_dir(), "tmp", "github-to-gitea")
 
 
 def start_screen_log(here, name):

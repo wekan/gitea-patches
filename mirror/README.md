@@ -56,6 +56,13 @@ the menu's **Destinations** - by default the same name as its Gitea owner.
 | private repositories | private projects (`private = no` skips them) | not mirrored: SourceForge projects are public |
 | avatars (step `avatars`) | organization or user -> GitLab group (or the token's own user); repository -> project avatar | not possible: SourceForge's API has no project icon; reported once per run |
 
+github-to-gitea mirrors release files by `release_assets` - `github` (the default:
+from GitHub), `local` (`assets_dir`) or `none` - and `release_assets_keep` says which
+releases keep them: `newest` (the default: the newest published release only), `all`,
+or a number of the newest releases. The files of older releases are deleted from
+Gitea. A file from GitHub is downloaded alone to WeKan's `.tools/tmp/github-to-gitea/`,
+uploaded to Gitea, and deleted, so at most one release file is on the disk at a time.
+
 A missing GitLab project is created, in a group that must exist. A SourceForge project
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools
 are created by the script.
@@ -93,6 +100,9 @@ are listed in `.gitignore`: they stay on this machine.
 
 ```sh
 python3 -I tests/mirror.test.py
+python3 -I tests/githubToGiteaPush.test.py
+python3 -I tests/githubToGiteaReleases.test.py
+python3 -I tests/screenLog.test.py
 ```
 
 A fake Gitea, GitLab and SourceForge and local git repositories - no network.

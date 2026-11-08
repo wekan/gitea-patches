@@ -41,6 +41,7 @@ case "$command" in
     bash tests/source-zips.sh
     python3 -I tests/mirror.test.py
     python3 -I tests/githubToGiteaPush.test.py
+    python3 -I tests/githubToGiteaReleases.test.py
     python3 -I tests/screenLog.test.py
     python3 -I tests/changelogShort.test.py ;;
   release-all)
