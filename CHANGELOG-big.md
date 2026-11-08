@@ -134,6 +134,22 @@ negative cases.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/b5d42d6634407e1317eca9a5ad420a24342e98e9">gitea-to-gitlab and gitea-to-sourceforge copy the newest release only, unless kept in full</a>. Thanks to xet7.</summary>
+
+The same release rules as github-to-gitea, in the shared engine: by default
+only the newest release, notes and files, and the files of older releases are
+deleted from the destination (`release_assets_keep`); the menu's item 9,
+Releases kept in full, lists the Gitea sources that keep every release. On
+GitLab an older release loses its asset links and generic package version, on
+SourceForge the files of its directory except `README.md`, its notes. Release
+files, avatars and the notes file go through WeKan's `.tools/tmp/<script>/`,
+and gitea-to-gitlab turns a project's wiki on when Gitea's wiki has pages.
+`tests/mirror.test.py` covers both destinations, the menu and the negative
+cases.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
