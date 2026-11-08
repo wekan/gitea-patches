@@ -63,6 +63,18 @@ or a number of the newest releases. The files of older releases are deleted from
 Gitea. A file from GitHub is downloaded alone to WeKan's `.tools/tmp/github-to-gitea/`,
 uploaded to Gitea, and deleted, so at most one release file is on the disk at a time.
 
+github-to-gitea's step `git` also copies the wiki of every repository that has one
+on GitHub - also a wiki written after the migration, which copies it only once. Gitea
+keeps a wiki as a git repository of its own beside the repository,
+`gitea-repositories/<owner>/<name>.wiki.git`. Gitea takes no push into a wiki it has
+not initialized, so a missing one is first created by Gitea itself (wiki turned on, a
+first page written, Gitea's hooks in place), and GitHub's wiki then replaces that page.
+GitHub's default wiki branch (`master`) goes to Gitea's default wiki branch (often
+`main`), the other branches by their names. As with the repository's branches, GitHub
+is the source: an edit made only in Gitea's wiki is overwritten. With Gitea's bare
+repository on this machine the wiki is fetched into it; otherwise it is pushed through a
+copy in WeKan's `.tools/tmp/github-to-gitea/wiki/`.
+
 A missing GitLab project is created, in a group that must exist. A SourceForge project
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools
 are created by the script.
@@ -102,6 +114,7 @@ are listed in `.gitignore`: they stay on this machine.
 python3 -I tests/mirror.test.py
 python3 -I tests/githubToGiteaPush.test.py
 python3 -I tests/githubToGiteaReleases.test.py
+python3 -I tests/githubToGiteaWiki.test.py
 python3 -I tests/screenLog.test.py
 ```
 

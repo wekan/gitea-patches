@@ -79,7 +79,7 @@ STEPS = ["migrate", "git", "issues", "releases", "actions", "avatars"]
 # The default steps before "avatars" was added: a settings file still saying this gets it.
 OLD_DEFAULT_STEPS = "migrate, git, issues, releases, actions"
 STEP_NAMES = {"migrate": "migration (repository, issues, PRs, comments, labels, milestones, wiki)",
-              "git": "git fetch into the bare repository (branches, tags, PR refs)",
+              "git": "git fetch into the bare repository (branches, tags, PR refs) and the wiki",
               "issues": "new issues/PRs and changes to existing ones",
               "releases": "releases (and their files, when release_assets is not none)",
               "actions": "GitHub Actions -> Gitea Actions (branch actions_branch)",
@@ -1433,6 +1433,122 @@ def ensure_owner(owner):
     _owners.add(owner)
 
 
+# --- 2b. the wiki ------------------------------------------------------------------
+#
+# Gitea keeps a wiki as a git repository of its own beside the repository -
+# gitea-repositories/<owner>/<name>.wiki.git - and so does GitHub (<name>.wiki.git).
+# The migration copies the wiki once, and only when GitHub said has_wiki then; this
+# copies every wiki GitHub has, on every run, also one written after the migration.
+
+def git_env(token):
+    return git_auth_env(token) if token else dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+
+def github_wiki_url():
+    return f"https://github.com/{GITHUB_REPO}.wiki.git"
+
+
+def gitea_wiki_url():
+    return gitea_git_url()[: -len(".git")] + ".wiki.git"
+
+
+def remote_heads(url, token):
+    """(default branch, {branch: sha}) of a git repository, or (None, {}) when there is
+    none - GitHub answers "not found" for a wiki that was never written, Gitea for one
+    that was never initialized."""
+    r = subprocess.run(["git", "ls-remote", "--symref", url, "HEAD", "refs/heads/*"],
+                       env=git_env(token), capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, {}
+    default, heads = None, {}
+    for line in r.stdout.splitlines():
+        if line.startswith("ref: ") and line.endswith("\tHEAD"):
+            default = line[len("ref: "):-len("\tHEAD")].removeprefix("refs/heads/")
+        elif "\trefs/heads/" in line:
+            sha, ref = line.split("\t", 1)
+            heads[ref.removeprefix("refs/heads/")] = sha
+    if heads and default not in heads:
+        default = "master" if "master" in heads else sorted(heads)[0]
+    return default, heads
+
+
+def wiki_refspecs(gh_default, gitea_default, heads):
+    """GitHub's default wiki branch goes to Gitea's default wiki branch - Gitea shows
+    the wiki from that one (often main, GitHub's is master) - and every other branch
+    to a branch of the same name."""
+    specs = [f"+refs/heads/{gh_default}:refs/heads/{gitea_default or gh_default}"]
+    specs += [f"+refs/heads/{b}:refs/heads/{b}" for b in sorted(heads) if b != gh_default]
+    return specs
+
+
+def ensure_wiki_on():
+    """The repository's Wiki tab is on, so the wiki copied from GitHub is shown in it
+    - also when <name>.wiki.git is on the disk but the wiki was turned off."""
+    s, d = gitea("GET", f"/repos/{OWNER}/{NAME}")
+    if s == 200 and not d.get("has_wiki"):
+        log("Wiki: turning the repository's wiki on in Gitea")
+        gt("PATCH", "", {"has_wiki": True})
+
+
+def init_gitea_wiki():
+    """Has Gitea initialize the wiki, with its hooks, by writing a page - Gitea takes
+    no push into a wiki that does not exist yet. The page is replaced by GitHub's wiki
+    right after."""
+    content = base64.b64encode(b"Copied from GitHub.\n").decode()
+    s, d = gt("POST", "/wiki/new", {"title": "Home", "content_base64": content,
+                                    "message": "Initialize the wiki, to copy it from GitHub"})
+    if s not in (200, 201):
+        raise RepoError(f"Gitea did not initialize the wiki: {s} {d}")
+
+
+def fetch_wiki(bare):
+    gh_token = github_token(GITHUB_REPO.split("/")[0])
+    gh_default, heads = remote_heads(github_wiki_url(), gh_token)
+    if not heads:
+        return
+    ensure_wiki_on()
+    gitea_token = os.environ["GITEA_TOKEN"]
+    wiki = bare[: -len(".git")] + ".wiki.git" if bare and bare.endswith(".git") else None
+    on_disk = wiki and os.path.exists(os.path.join(wiki, "HEAD"))
+    if not on_disk and not remote_heads(gitea_wiki_url(), gitea_token)[1]:
+        # No wiki at Gitea yet, or one with no page: never a Gitea edit to keep.
+        log("Wiki: GitHub has one, Gitea not yet - initializing it in Gitea")
+        if DRY:
+            log(f"    [dry-run] POST /repos/{OWNER}/{NAME}/wiki/new; git fetch {github_wiki_url()}")
+            return
+        init_gitea_wiki()
+        on_disk = wiki and os.path.exists(os.path.join(wiki, "HEAD"))
+    if on_disk:
+        head = subprocess.run(["git", "-C", wiki, "symbolic-ref", "--short", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        cmd = ["git", "-C", wiki, "fetch", "--quiet", github_wiki_url()] + wiki_refspecs(gh_default, head, heads)
+        log(f"git fetch the wiki from GitHub -> {wiki}")
+        if DRY:
+            log("    [dry-run] " + " ".join(cmd))
+            return
+        subprocess.run(cmd, check=True, env=git_env(gh_token))
+        return
+    # Gitea is on another machine: through a copy under .tools/tmp, pushed over HTTPS.
+    gitea_default = remote_heads(gitea_wiki_url(), gitea_token)[0]
+    cache = os.path.join(mirror_tmp_dir(), "wiki", OWNER, NAME + ".wiki.git")
+    if not os.path.exists(os.path.join(cache, "HEAD")):
+        os.makedirs(cache, exist_ok=True)
+        subprocess.run(["git", "init", "--quiet", "--bare", cache], check=True)
+    log(f"git fetch the wiki from GitHub and push it -> {gitea_wiki_url()}")
+    subprocess.run(["git", "-C", cache, "fetch", "--quiet", github_wiki_url(), "+refs/heads/*:refs/heads/*"],
+                   check=True, env=git_env(gh_token))
+    specs = wiki_refspecs(gh_default, gitea_default, heads)
+    if DRY:
+        log(f"    [dry-run] git push {gitea_wiki_url()} " + " ".join(specs))
+        return
+    r = subprocess.run(["git", "-C", cache, "push", "--quiet", gitea_wiki_url()] + specs,
+                       env=git_auth_env(gitea_token), capture_output=True, text=True)
+    if r.returncode != 0:
+        log((r.stdout + r.stderr).rstrip())
+        raise subprocess.CalledProcessError(r.returncode, r.args)
+
+
+
 _owners = set()
 
 
@@ -1445,7 +1561,9 @@ def run_repo(full, steps):
     elif not repo_exists(NAME):
         raise RepoError("the repository is not in Gitea; run the migration first")
     if "git" in steps:
-        fetch_git(find_bare())
+        bare = find_bare()
+        fetch_git(bare)
+        fetch_wiki(bare)
     if "issues" in steps:
         sync_issues(state)
     if "releases" in steps:
