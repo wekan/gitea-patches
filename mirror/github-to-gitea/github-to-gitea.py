@@ -38,11 +38,13 @@ STEPS
             github-pr/<N>), and changes to existing ones: title, body, state, labels, new
             comments. If a pull request cannot be made a real one, the repository stops
             instead of making it an issue (the numbers would get out of step).
-  releases  missing releases, with the tag on the right commit; files according to the
+  releases  releases, with the tag on the right commit; files according to the
             setting release_assets (github / local / none). By default only the
-            newest release keeps its files (setting release_assets_keep: newest, all,
-            or a number of newest releases); the files of older ones are deleted
-            from Gitea. A file from GitHub is downloaded alone to WeKan's
+            newest release - its text and its files - is synced, and the files of
+            older ones are deleted from Gitea (setting release_assets_keep: newest,
+            all, or a number of newest releases). The repositories in the menu's
+            "Releases kept in full" list - (all), an organization or user, or
+            owner/name - get every release, text and files, and keep them all. A file from GitHub is downloaded alone to WeKan's
             .tools/tmp/github-to-gitea/, uploaded to Gitea, and deleted.
   actions   .github/workflows -> branch actions_branch (main + .gitea/workflows + .gitea/gh).
             See the menu item "Help: Gitea Actions".
@@ -347,11 +349,17 @@ INI_HEADER = """\
 #   (all)         every private and public repository the GitHub token can write to
 #   (allpublic)   every public repository the GitHub token can write to
 #   (allprivate)  every private repository the GitHub token can write to
+#
+# [releases_all] list: one per line, the same forms - (all), (allpublic), (allprivate),
+#   an organization or user, or owner/name. Those repositories get EVERY release, text
+#   and files, and keep them all. Every other repository gets only its newest release
+#   (release_assets_keep), and only it keeps its files. Empty: only the newest, everywhere.
 """
 
 
 def load_config():
-    CFG.read_dict({"gitea": {}, "github": {}, "sources": {"list": ""}, "options": {}})
+    CFG.read_dict({"gitea": {}, "github": {}, "sources": {"list": ""}, "releases_all": {"list": ""},
+                   "options": {}})
     if os.path.exists(INI_FILE):
         CFG.read(INI_FILE, encoding="utf-8")
     added = False
@@ -387,6 +395,36 @@ def sources():
 
 def set_sources(items):
     CFG.set("sources", "list", "\n" + "\n".join(items) if items else "")
+
+
+def releases_all():
+    """The menu's "Releases kept in full": sources whose every release is synced, text
+    and files, and keeps them all."""
+    return [s.strip() for s in CFG.get("releases_all", "list", fallback="").replace(",", "\n").split("\n")
+            if s.strip()]
+
+
+def set_releases_all(items):
+    CFG.set("releases_all", "list", "\n" + "\n".join(items) if items else "")
+
+
+def keeps_all_releases():
+    """True when the repository is in "Releases kept in full": (all), (allpublic) or
+    (allprivate) by its visibility, its owner (organization or user) or owner/name -
+    GitHub's names, in any case."""
+    full, owner = GITHUB_REPO.lower(), GITHUB_REPO.split("/", 1)[0].lower()
+    for item in releases_all():
+        v = item.lower()
+        if v == "(all)" or v == full or v == owner:
+            return True
+        if v in ("(allpublic)", "(allprivate)"):
+            try:
+                private = bool(repo_info().get("private"))
+            except LookupError:
+                continue
+            if private == (v == "(allprivate)"):
+                return True
+    return False
 
 
 def apply_config():
@@ -1139,8 +1177,11 @@ def sync_releases():
                 f"{gh_rel[0]['tag_name']}.")
     # GitHub lists the newest first; a draft is no release yet.
     published = [r["tag_name"] for r in gh_rel if not r.get("draft")]
-    n = keep_count()
+    full = keeps_all_releases() and not source
+    n = None if full else keep_count()
     keep = set(published if n is None else published[:n])
+    if full:
+        log("  Releases kept in full: every release, text and files.")
     if source:
         # The upstream's earlier newest release, copied by an earlier run, keeps its text
         # but not its files: only the newest release has them, as with the fork's own.
@@ -1153,6 +1194,12 @@ def sync_releases():
         want = {"tag_name": tag, "name": r.get("name") or tag, "body": r.get("body") or "",
                 "draft": r["draft"], "prerelease": r["prerelease"]}
         cur = existing.get(tag)
+        if tag not in keep and not full:
+            # Only the newest release(s) are synced: an older one already in Gitea (from
+            # the migration or an earlier run) keeps its text and loses its files.
+            if cur and cur.get("id") and opt("release_assets").strip().lower() != "none":
+                delete_assets(cur, tag)
+            continue
         if cur is None:
             # The tag has to be on the right commit BEFORE the release, or Gitea would make
             # it at the tip of target_commitish (main).
@@ -1872,6 +1919,48 @@ def menu_sources():
                     print(f"  {s}: {e}")
 
 
+RELEASES_ALL_HELP = """\
+  Every release - text and files - is synced and kept for the repositories listed here:
+    (all)         every repository
+    (allpublic)   every public repository / (allprivate) every private repository
+    org or user   every repository of a GitHub organization or user, e.g. wekan
+    owner/name    one repository, e.g. wekan/wekan
+  Every other repository gets only its newest release, text and files, and only the
+  newest release keeps its files in Gitea (setting release_assets_keep)."""
+
+
+def menu_releases_all():
+    while True:
+        items = releases_all()
+        print("\nReleases kept in full:")
+        print(RELEASES_ALL_HELP + "\n\n  Listed:")
+        for i, s in enumerate(items, 1):
+            print(f" {i:2}) {s}")
+        if not items:
+            print("    (none - only the newest release is synced)")
+        print("  a) Add   r) Remove   0) Back")
+        c = ask("Choice").lower()
+        if c in ("", "0"):
+            return
+        if c == "a":
+            v = ask("(all) / (allpublic) / (allprivate), a GitHub organization or user, or owner/name").strip().strip("/")
+            v = v.replace("https://github.com/", "").removesuffix(".git")
+            if v.lower() in SPECIAL:
+                v = v.lower()
+            if v and v.lower() not in [x.lower() for x in items] and \
+                    (v in SPECIAL or re.fullmatch(r"[\w.-]+(/[\w.-]+)?", v)):
+                set_releases_all(items + [v])
+                save_config()
+            elif v:
+                print("Not valid, or already in the list.")
+        elif c == "r":
+            n = ask("Number to remove")
+            if n.isdigit() and 1 <= int(n) <= len(items):
+                del items[int(n) - 1]
+                set_releases_all(items)
+                save_config()
+
+
 def pick_source():
     items = sources()
     for i, s in enumerate(items, 1):
@@ -1893,6 +1982,7 @@ def menu():
 GitHub -> Gitea     Gitea: {opt('url', 'gitea')}     settings: {os.path.basename(INI_FILE)}
 Sources: {', '.join(items) or '(none - add one with 3)'}
 Dry run: {'ON' if flag('dry_run') else 'off'}   Replace wrongly imported: {'yes' if flag('replace_broken') else 'no'}   Release files: {opt('release_assets')} ({opt('release_assets_keep')})
+Releases kept in full: {', '.join(releases_all()) or '(none - only the newest release)'}
 
  1) Run every step ({opt('steps')}) for every source
  2) Run chosen steps for a chosen source
@@ -1902,6 +1992,7 @@ Dry run: {'ON' if flag('dry_run') else 'off'}   Replace wrongly imported: {'yes'
  6) Replace a wrongly imported repository: on / off
  7) Convert a local .github/workflows to Gitea Actions (a check, no Gitea)
  8) Help: Gitea Actions runners and variables
+ 9) Releases kept in full: which organizations, users or repositories keep every release
  0) Quit""")
         c = ask("Choice")
         try:
@@ -1936,6 +2027,8 @@ Dry run: {'ON' if flag('dry_run') else 'off'}   Replace wrongly imported: {'yes'
                 print(f"Converted: {dst}/.gitea/workflows")
             elif c == "8":
                 print(ACTIONS_HELP)
+            elif c == "9":
+                menu_releases_all()
         except SystemExit as e:
             print(e)
         except KeyboardInterrupt:

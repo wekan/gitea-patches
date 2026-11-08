@@ -57,10 +57,14 @@ the menu's **Destinations** - by default the same name as its Gitea owner.
 | avatars (step `avatars`) | organization or user -> GitLab group (or the token's own user); repository -> project avatar | not possible: SourceForge's API has no project icon; reported once per run |
 
 github-to-gitea mirrors release files by `release_assets` - `github` (the default:
-from GitHub), `local` (`assets_dir`) or `none` - and `release_assets_keep` says which
-releases keep them: `newest` (the default: the newest published release only), `all`,
-or a number of the newest releases. The files of older releases are deleted from
-Gitea. A file from GitHub is downloaded alone to WeKan's `.tools/tmp/github-to-gitea/`,
+from GitHub), `local` (`assets_dir`) or `none`. By default only a repository's
+**newest release** is synced - its text and its files - and the files of older
+releases are deleted from Gitea; `release_assets_keep` can make that the N newest
+(or `all`). The menu's **9) Releases kept in full** lists what keeps EVERY release,
+text and files: `(all)`, `(allpublic)`, `(allprivate)`, a GitHub organization or user
+(`wekan`), or one repository (`wekan/wekan`) - saved as `[releases_all] list` in
+`github-to-gitea.ini`. An older release already in Gitea - from the migration, or
+from before - keeps its text and loses its files. A file from GitHub is downloaded alone to WeKan's `.tools/tmp/github-to-gitea/`,
 uploaded to Gitea, and deleted, so at most one release file is on the disk at a time.
 
 github-to-gitea's step `git` also copies the wiki of every repository that has one

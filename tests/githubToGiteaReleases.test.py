@@ -39,15 +39,21 @@ GH = [{"tag_name": t, "name": t, "body": "", "draft": t == "v4", "prerelease": F
       for t in ("v4", "v3", "v2", "v1")]
 
 
-def run(keep, gitea_assets, dry=False, fail_upload=False):
+def run(keep, gitea_assets, dry=False, fail_upload=False, releases_all="", in_gitea=("v4", "v3", "v2", "v1"),
+        repo="wekan/wekan", private=False):
     """One sync_releases; returns (uploads, deletions, files seen in the tmp dir during uploads)."""
     calls, during = [], []
     g.DRY = dry
     g.CFG = configparser.ConfigParser(interpolation=None)
-    g.CFG.read_dict({"options": {"release_assets": "github", "release_assets_keep": keep, "assets_max_mb": "100"}})
+    g.CFG.read_dict({"options": {"release_assets": "github", "release_assets_keep": keep, "assets_max_mb": "100"},
+                     "releases_all": {"list": releases_all}})
+    g.GITHUB_REPO = repo
+    g._info.clear()
+    g._info[repo] = {"fork": False, "private": private}
+    g.ensure_tag = lambda tag, src=None: True
     rel = {t: {"id": i, "tag_name": t, "name": t, "body": "", "draft": t == "v4", "prerelease": False,
                "assets": [{"id": 100 + i, "name": f"weddy-{t}.zip"}] if t in gitea_assets else []}
-           for i, t in enumerate(("v4", "v3", "v2", "v1"), 1)}
+           for i, t in enumerate(("v4", "v3", "v2", "v1"), 1) if t in in_gitea}
     g.gt_all = lambda path, repo=None: iter(rel.values())
     g.gh_all = lambda path, params=None: iter(GH)
 
@@ -56,8 +62,12 @@ def run(keep, gitea_assets, dry=False, fail_upload=False):
         if method == "POST" and "/assets" in path:
             during.append(sorted(os.listdir(os.environ["MIRROR_TMP_DIR"])))
             return (500, "full") if fail_upload else (201, {})
+        if method == "POST" and path == "/releases":
+            created.append(body["tag_name"])
+            return 201, dict(body, id=50 + len(created), assets=[])
         return 204, None
 
+    created = []
     g.gitea = gitea
     g.gt = lambda m, p, b=None, **kw: gitea(m, p, b)
 
@@ -72,6 +82,7 @@ def run(keep, gitea_assets, dry=False, fail_upload=False):
     g.sync_releases()
     uploads = [p for m, p in calls if m == "POST" and "/assets" in p]
     deletes = [p for m, p in calls if m == "DELETE"]
+    run.created = created
     return uploads, deletes, during
 
 
@@ -96,6 +107,36 @@ run("newest", gitea_assets=set(), fail_upload=True)
 check("negative: a failed upload still deletes the downloaded file", os.listdir(os.environ["MIRROR_TMP_DIR"]) == [])
 up, dl, _ = run("newest", gitea_assets={"v1", "v2"}, dry=True)
 check("negative: a dry run deletes and uploads nothing", up == [] and dl == [])
+
+# "Releases kept in full": every release, text and files, for the listed repositories;
+# every other repository gets only its newest release.
+up, dl, _ = run("newest", gitea_assets=set(), in_gitea=())
+check("no list: only the newest release's text is synced to Gitea", run.created == ["v3"] and len(up) == 1)
+for item in ("wekan/wekan", "WEKAN", "(all)", "(allpublic)"):
+    up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all=f"\nxet7\n{item}")
+    check(f"listed as {item}: every release is synced, oldest first, and all keep their files",
+          run.created == ["v1", "v2", "v3", "v4"] and len(up) == 3 and dl == [])
+up, dl, _ = run("newest", gitea_assets={"v2", "v1"}, releases_all="(all)")
+check("listed: files already in Gitea are kept", dl == [])
+up, dl, _ = run("newest", gitea_assets={"v2", "v1"}, releases_all="wekan/wekan", repo="wekan/other")
+check("negative: owner/name keeps all for that repository only", run.created == [] and len(dl) == 2)
+up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all="(allprivate)")
+check("negative: (allprivate) does not cover a public repository", run.created == ["v3"])
+up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all="wekan/wekan2")
+check("negative: a longer name is no match", run.created == ["v3"])
+
+# The menu: add (all) and wekan/wekan, refuse a duplicate and a bad name, remove one.
+answers = iter(["a", "(ALL)", "a", "https://github.com/wekan/wekan.git", "a", "Wekan/Wekan", "a", "bad name!",
+                "r", "1", "0"])
+g.ask = lambda prompt, default="": next(answers)
+g.save_config = lambda: None
+g.CFG = configparser.ConfigParser(interpolation=None)
+g.CFG.read_dict({"releases_all": {"list": ""}})
+import contextlib
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    g.menu_releases_all()
+check("the menu adds, refuses a duplicate or a bad name, and removes", g.releases_all() == ["wekan/wekan"])
+check("negative: what the menu refused is said", out.getvalue().count("Not valid, or already in the list.") == 2)
 
 # The old default none becomes github once, in an ini file from before
 # release_assets_keep; none chosen after that stays none.
