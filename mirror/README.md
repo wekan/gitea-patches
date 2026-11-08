@@ -68,6 +68,26 @@ from before - keeps its text and loses its files. A file from GitHub is download
 alone to WeKan's `.tools/tmp/github-to-gitea/`, uploaded to Gitea, and deleted, so at
 most one release file is on the disk at a time.
 
+**Release files of any size into Gitea.** Two limits apply, and both can be lifted:
+
+- github-to-gitea's setting `assets_max_mb` (default 2048): a larger file is skipped.
+  `0` is no limit.
+- Gitea's own, in its `app.ini` (then restart Gitea). The release files' limit is
+  `[repository.release] FILE_MAX_SIZE`, in MB, default 2048 - not `[attachment]
+  MAX_SIZE`, which is the limit of files attached to issues and comments. `-1` is no
+  limit: Gitea checks the size only when it is not negative, and the script's upload
+  is multipart, whose size Gitea knows.
+
+  ```ini
+  [repository.release]
+  FILE_MAX_SIZE = -1
+  ```
+
+  Gitea writes an uploaded file to its temporary directory before storing it, so the
+  `TMPDIR` of the Gitea process needs room for the largest file - `/tmp` is often a
+  small tmpfs - and a reverse proxy in front of Gitea needs its own request size
+  limit lifted (nginx `client_max_body_size 0;`; Caddy has none by default).
+
 gitea-to-gitlab and gitea-to-sourceforge do the same, from Gitea: the same
 `release_assets_keep` setting (default `newest`), and the same menu item **9)
 Releases kept in full** with Gitea's organizations, users and repositories. An older

@@ -319,7 +319,7 @@ COMMON_SETTINGS = [
     ("options", "include_forks", "yes", "mirror forks"),
     ("options", "include_archived", "yes", "mirror archived repositories"),
     ("options", "wiki", "yes", "mirror the wiki, where the target has a git wiki"),
-    ("options", "assets_max_mb", "5000", "largest release file to copy"),
+    ("options", "assets_max_mb", "5000", "largest release file to copy, in MB; 0 = no limit"),
     ("options", "release_assets_keep", "newest", "releases synced, with their files, outside 'Releases kept in full': "
                                                  "newest | all | N (the N newest); older ones lose their files"),
 ]

@@ -104,7 +104,7 @@ SETTINGS = [
     ("options", "release_assets", "github", "release files: github (download from GitHub) | local (assets_dir) | none"),
     ("options", "release_assets_keep", "newest", "releases that keep their files: newest | all | N (the N newest); the files of older releases are deleted from Gitea"),
     ("options", "assets_dir", "", "directory <tag>/<files> (release_assets = local); {owner} {name} allowed"),
-    ("options", "assets_max_mb", "2048", "largest file to upload (Gitea's [attachment] MAX_SIZE)"),
+    ("options", "assets_max_mb", "2048", "largest release file to upload, in MB; 0 = no limit (Gitea: [repository.release] FILE_MAX_SIZE)"),
     ("options", "bare_repo", "~/gitea/data/gitea-repositories/{owner}/{name}.git",
      "Gitea's bare repositories on this machine ({owner} {name}); git fetch only when found"),
     ("options", "actions_branch", "gitea-actions", "branch the converted workflows are written to"),

@@ -40,12 +40,12 @@ GH = [{"tag_name": t, "name": t, "body": "", "draft": t == "v4", "prerelease": F
 
 
 def run(keep, gitea_assets, dry=False, fail_upload=False, releases_all="", in_gitea=("v4", "v3", "v2", "v1"),
-        repo="wekan/wekan", private=False):
+        repo="wekan/wekan", private=False, max_mb="100", size=10):
     """One sync_releases; returns (uploads, deletions, files seen in the tmp dir during uploads)."""
     calls, during = [], []
     g.DRY = dry
     g.CFG = configparser.ConfigParser(interpolation=None)
-    g.CFG.read_dict({"options": {"release_assets": "github", "release_assets_keep": keep, "assets_max_mb": "100"},
+    g.CFG.read_dict({"options": {"release_assets": "github", "release_assets_keep": keep, "assets_max_mb": max_mb},
                      "releases_all": {"list": releases_all}})
     g.GITHUB_REPO = repo
     g._info.clear()
@@ -55,7 +55,8 @@ def run(keep, gitea_assets, dry=False, fail_upload=False, releases_all="", in_gi
                "assets": [{"id": 100 + i, "name": f"weddy-{t}.zip"}] if t in gitea_assets else []}
            for i, t in enumerate(("v4", "v3", "v2", "v1"), 1) if t in in_gitea}
     g.gt_all = lambda path, repo=None: iter(rel.values())
-    g.gh_all = lambda path, params=None: iter(GH)
+    gh = [dict(r, assets=[dict(a, size=size) for a in r["assets"]]) for r in GH]
+    g.gh_all = lambda path, params=None: iter(gh)
 
     def gitea(method, path, body=None, repo=None, stream=None, **kw):
         calls.append((method, path))
@@ -124,6 +125,13 @@ up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all="(allpri
 check("negative: (allprivate) does not cover a public repository", run.created == ["v3"])
 up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all="wekan/wekan2")
 check("negative: a longer name is no match", run.created == ["v3"])
+
+# assets_max_mb: a file over it is skipped; 0 is no limit (Gitea's own limit is
+# [repository.release] FILE_MAX_SIZE).
+up, dl, _ = run("newest", gitea_assets=set(), max_mb="1", size=5 * 1048576)
+check("negative: a file over assets_max_mb is not uploaded", up == [])
+up, dl, _ = run("newest", gitea_assets=set(), max_mb="0", size=50 * 1024 ** 3)
+check("assets_max_mb = 0: a 50 GB file is uploaded", up == ["/releases/2/assets?name=weddy-v3.zip"])
 
 # The menu: add (all) and wekan/wekan, refuse a duplicate and a bad name, remove one.
 answers = iter(["a", "(ALL)", "a", "https://github.com/wekan/wekan.git", "a", "Wekan/Wekan", "a", "bad name!",
