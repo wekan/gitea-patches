@@ -91,6 +91,21 @@ fails. `tests/githubToGiteaReleases.test.py` covers each setting.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/8220d434cdb5cd88b71b02175b0f93c79d9fb90e">github-to-gitea copies every repository's wiki into its Gitea Wiki tab</a>. Thanks to xet7.</summary>
+
+The migration copied a wiki once, and only when GitHub said `has_wiki` then, so
+a wiki written later never reached Gitea. The step `git` now copies each wiki
+GitHub has into Gitea's `<name>.wiki.git`, shown in the repository's Wiki tab:
+the wiki is turned on when it is off, a wiki Gitea does not have yet is first
+initialized by Gitea itself (it takes no push into one that does not exist,
+and creates its hooks then), and GitHub's default wiki branch goes to Gitea's
+default wiki branch. With the bare repository on this machine the wiki is
+fetched into it; otherwise it is pushed through a copy under `.tools/tmp`.
+`tests/githubToGiteaWiki.test.py` covers all three cases.
+
+</details>
+
 **Finnish** - the whole web UI.
 
 <details>
