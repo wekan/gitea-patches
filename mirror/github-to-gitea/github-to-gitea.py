@@ -96,6 +96,8 @@ SETTINGS = [
     ("options", "include_forks", "yes", "import the forks of an organization or user"),
     ("options", "include_archived", "yes", "import the archived repositories of an organization or user"),
     ("options", "wiki", "yes", "import the wiki in the migration"),
+    ("options", "sync_forks", "yes", "a GitHub fork with no commits of its own is first brought up to its upstream with `gh repo sync`"),
+    ("options", "fork_upstream_release", "yes", "a GitHub fork with no releases gets its upstream's newest release, text and files"),
     ("options", "lfs", "yes", "import Git LFS files in the migration"),
     ("options", "release_assets", "github", "release files: github (download from GitHub) | local (assets_dir) | none"),
     ("options", "release_assets_keep", "newest", "releases that keep their files: newest | all | N (the N newest); the files of older releases are deleted from Gitea"),
@@ -610,6 +612,102 @@ def ensure_migrated(state, replace_broken):
     save_state(state)
 
 
+# --- 1b. a fork on GitHub ---------------------------------------------------------
+
+_info = {}
+
+
+def repo_info():
+    """GitHub's answer for the repository, read once per repository and run."""
+    if GITHUB_REPO not in _info:
+        _info[GITHUB_REPO] = gh(f"repos/{GITHUB_REPO}")
+    return _info[GITHUB_REPO]
+
+
+def fork_parent():
+    """The upstream owner/name of a GitHub fork, or None."""
+    try:
+        info = repo_info()
+    except LookupError:
+        return None
+    return (info.get("parent") or {}).get("full_name") if info.get("fork") else None
+
+
+def sync_fork_on_github():
+    """A fork with no commits of its own, behind its upstream, is brought up to it on
+    GitHub with `gh repo sync` - gh's own login, which already may write there - before
+    it is copied to Gitea. Without --force: gh only fast-forwards, and a fork with
+    commits of its own (ahead or diverged) is left exactly as it is."""
+    if not flag("sync_forks"):
+        return
+    parent = fork_parent()
+    if not parent:
+        return
+    branch = repo_info().get("default_branch") or "main"
+    fork_owner = GITHUB_REPO.split("/", 1)[0]
+    q = urllib.parse.quote
+    try:
+        c = gh(f"repos/{parent}/compare/{q(branch, safe='')}...{q(fork_owner, safe='')}:{q(branch, safe='')}")
+    except LookupError as e:
+        log(f"Fork of {parent}: not compared with it ({e}); not synced.")
+        return
+    status, ahead, behind = c.get("status"), c.get("ahead_by", 0), c.get("behind_by", 0)
+    if ahead:
+        log(f"Fork of {parent}: {ahead} commit(s) of its own on {branch}; not synced.")
+        return
+    if not behind:
+        log(f"Fork of {parent}: {branch} is up to date with it.")
+        return
+    gh_cli = shutil.which("gh")
+    if not gh_cli:
+        log(f"Fork of {parent}: {behind} commit(s) behind, but the gh command is not installed; not synced.")
+        return
+    cmd = [gh_cli, "repo", "sync", GITHUB_REPO, "--source", parent, "--branch", branch]
+    log(f"Fork of {parent}: {behind} commit(s) behind, none of its own ({status}) - syncing it on GitHub")
+    if DRY:
+        log("    [dry-run] " + " ".join(cmd[1:]))
+        return
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"  gh repo sync failed: {(r.stdout + r.stderr).strip()}")
+        return
+    _info.pop(GITHUB_REPO, None)
+    log(f"  {GITHUB_REPO} {branch} is now at {parent}'s.")
+
+
+def fetch_upstream_tag(parent, tag):
+    """An upstream release's tag, and so its commit, into Gitea: a fork does not get
+    upstream's newer tags, and Gitea makes a tag only on a commit it has. Into the bare
+    repository on this machine, or pushed through a copy under .tools/tmp."""
+    url = f"https://github.com/{parent}.git"
+    spec = f"+refs/tags/{tag}:refs/tags/{tag}"
+    gh_token = github_token(parent.split("/")[0])
+    bare = find_bare()
+    try:
+        if bare:
+            cmd = ["git", "-C", bare, "fetch", "--quiet", "--no-tags", url, spec]
+            if DRY:
+                log("    [dry-run] " + " ".join(cmd))
+                return
+            subprocess.run(cmd, check=True, env=git_env(gh_token))
+            return
+        cache = os.path.join(mirror_tmp_dir(), "upstream", OWNER, NAME + ".git")
+        if not os.path.exists(os.path.join(cache, "HEAD")):
+            os.makedirs(cache, exist_ok=True)
+            subprocess.run(["git", "init", "--quiet", "--bare", cache], check=True)
+        subprocess.run(["git", "-C", cache, "fetch", "--quiet", "--no-tags", url, spec],
+                       check=True, env=git_env(gh_token))
+        if DRY:
+            log(f"    [dry-run] git push {gitea_git_url()} refs/tags/{tag}")
+            return
+        r = subprocess.run(["git", "-C", cache, "push", "--quiet", gitea_git_url(), f"refs/tags/{tag}:refs/tags/{tag}"],
+                           env=git_auth_env(os.environ["GITEA_TOKEN"]), capture_output=True, text=True)
+        if r.returncode != 0:
+            log((r.stdout + r.stderr).rstrip())
+    except (subprocess.CalledProcessError, OSError) as e:
+        log(f"  {tag}: fetching the tag from {parent} failed: {e}")
+
+
 # --- 2. git refs ----------------------------------------------------------------
 
 def bare_paths(path=None):
@@ -888,22 +986,33 @@ def sync_issues(state):
 
 # --- 4. releases ---------------------------------------------------------------
 
-def tag_sha(tag):
-    ref = gh(f"repos/{GITHUB_REPO}/git/ref/tags/{urllib.parse.quote(tag)}")["object"]
+def tag_sha(tag, repo=None):
+    repo = repo or GITHUB_REPO
+    ref = gh(f"repos/{repo}/git/ref/tags/{urllib.parse.quote(tag)}")["object"]
     while ref["type"] == "tag":
-        ref = gh(f"repos/{GITHUB_REPO}/git/tags/{ref['sha']}")["object"]
+        ref = gh(f"repos/{repo}/git/tags/{ref['sha']}")["object"]
     return ref["sha"]
 
 
-def ensure_tag(tag):
+def ensure_tag(tag, repo=None):
+    """The tag in Gitea, on GitHub's commit. repo is where the tag is read from - the
+    fork's upstream for an upstream release - whose commit is fetched into Gitea first
+    when Gitea does not have it."""
     s, _ = gt("GET", "/tags/" + urllib.parse.quote(tag, safe=""))
     if s == 200:
         return True
     try:
-        sha = tag_sha(tag)
+        sha = tag_sha(tag, repo)
     except LookupError as e:
         log(f"  {tag}: the tag is not on GitHub either ({e})")
         return False
+    if repo and repo != GITHUB_REPO:
+        # The fetch brings the tag itself too; Gitea reads tags from git.
+        fetch_upstream_tag(repo, tag)
+        s, _ = gt("GET", "/tags/" + urllib.parse.quote(tag, safe=""))
+        if s == 200:
+            log(f"  {tag}: tag fetched from {repo} at commit {sha[:10]}")
+            return True
     s, d = gt("POST", "/tags", {"tag_name": tag, "target": sha})
     if s == 201 or DRY:
         log(f"  {tag}: tag created at commit {sha[:10]}")
@@ -1004,14 +1113,41 @@ def delete_assets(cur, tag):
         log(f"  {tag}: {a['name']} " + ("deleted (an older release)" if s in (200, 204) else f"not deleted: {s} {d}"))
 
 
+def upstream_newest_release():
+    """(upstream owner/name, [its newest published release]) for a fork with no releases
+    of its own, or (None, []) - not a fork, the setting is off, or upstream has none."""
+    if not flag("fork_upstream_release"):
+        return None, []
+    parent = fork_parent()
+    if not parent:
+        return None, []
+    for r in gh(f"repos/{parent}/releases", {"per_page": 30}):
+        if not r.get("draft"):
+            return parent, [r]
+    return parent, []
+
+
 def sync_releases():
     existing = {r["tag_name"]: r for r in gt_all("/releases")}
     gh_rel = list(gh_all(f"repos/{GITHUB_REPO}/releases"))
     log(f"Releases: {len(existing)} in Gitea, {len(gh_rel)} on GitHub.")
+    source = None
+    if not gh_rel:
+        source, gh_rel = upstream_newest_release()
+        if gh_rel:
+            log(f"  A fork with no releases: the newest release of its upstream {source}, "
+                f"{gh_rel[0]['tag_name']}.")
     # GitHub lists the newest first; a draft is no release yet.
     published = [r["tag_name"] for r in gh_rel if not r.get("draft")]
     n = keep_count()
     keep = set(published if n is None else published[:n])
+    if source:
+        # The upstream's earlier newest release, copied by an earlier run, keeps its text
+        # but not its files: only the newest release has them, as with the fork's own.
+        keep = set(published[:1])
+        for tag, cur in existing.items():
+            if tag not in keep and opt("release_assets").strip().lower() != "none":
+                delete_assets(cur, tag)
     for r in reversed(gh_rel):  # vanhin ensin
         tag = r["tag_name"]
         want = {"tag_name": tag, "name": r.get("name") or tag, "body": r.get("body") or "",
@@ -1020,7 +1156,7 @@ def sync_releases():
         if cur is None:
             # The tag has to be on the right commit BEFORE the release, or Gitea would make
             # it at the tip of target_commitish (main).
-            if not ensure_tag(tag):
+            if not ensure_tag(tag, source):
                 continue
             s, cur = gt("POST", "/releases", want)
             if s != 201 and not DRY:
@@ -1556,6 +1692,8 @@ def run_repo(full, steps):
     state = select_repo(full)
     log(f"\n=== GitHub {GITHUB_REPO} -> Gitea {GITEA_URL.rsplit('/api', 1)[0]}/{OWNER}/{NAME}")
     ensure_owner(OWNER)
+    if "migrate" in steps or "git" in steps:
+        sync_fork_on_github()
     if "migrate" in steps:
         ensure_migrated(state, flag("replace_broken"))
     elif not repo_exists(NAME):

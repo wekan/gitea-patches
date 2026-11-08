@@ -75,6 +75,20 @@ is the source: an edit made only in Gitea's wiki is overwritten. With Gitea's ba
 repository on this machine the wiki is fetched into it; otherwise it is pushed through a
 copy in WeKan's `.tools/tmp/github-to-gitea/wiki/`.
 
+A repository that is a **fork on GitHub** gets two more things from github-to-gitea:
+
+- When it has no commits of its own and its upstream is newer, it is first brought up
+  to the upstream **on GitHub**, with `gh repo sync <fork> --source <upstream> --branch
+  <default branch>` - the `gh` command's own login, which already may write there -
+  and only then copied to Gitea. GitHub's compare API decides: a fork that is ahead of
+  its upstream or has diverged from it is never synced, and `gh repo sync` runs without
+  `--force`, so it only fast-forwards. Setting `sync_forks` (default `yes`).
+- When it has no releases of its own, its upstream's newest published release - text
+  and files - is copied to Gitea, with the release's tag and commit fetched from the
+  upstream (a fork does not get upstream's newer tags). An upstream release copied by
+  an earlier run keeps its text, and its files are deleted, as for the fork's own
+  older releases. Setting `fork_upstream_release` (default `yes`).
+
 A missing GitLab project is created, in a group that must exist. A SourceForge project
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools
 are created by the script.
@@ -115,6 +129,7 @@ python3 -I tests/mirror.test.py
 python3 -I tests/githubToGiteaPush.test.py
 python3 -I tests/githubToGiteaReleases.test.py
 python3 -I tests/githubToGiteaWiki.test.py
+python3 -I tests/githubToGiteaFork.test.py
 python3 -I tests/screenLog.test.py
 ```
 

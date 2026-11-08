@@ -43,6 +43,7 @@ case "$command" in
     python3 -I tests/githubToGiteaPush.test.py
     python3 -I tests/githubToGiteaReleases.test.py
     python3 -I tests/githubToGiteaWiki.test.py
+    python3 -I tests/githubToGiteaFork.test.py
     python3 -I tests/screenLog.test.py
     python3 -I tests/changelogShort.test.py ;;
   release-all)
