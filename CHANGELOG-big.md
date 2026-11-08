@@ -204,6 +204,21 @@ now gives `maxFiles` 0, and the upload test checks 0 too.
 
 </details>
 
+**Freeing disk space** - in the local Gitea.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/51b662900cf0bfe4b1f5423ff5c7fb4b5a71bd56">github-to-gitea's menu frees Gitea's disk by deleting release files</a>. Thanks to xet7.</summary>
+
+Menu item 10 deletes release files from every repository of the local Gitea,
+not only the configured sources: keep the newest release's files and delete
+the older ones (drafts and Releases kept in full are left alone), or delete all
+of them. The releases and their notes stay. It asks for `yes`, deletes nothing
+in a dry run and says how much it freed; `--prune-release-files older|all` does
+the same from cron. `tests/githubToGiteaReleases.test.py` covers both choices,
+the menu and the negative cases.
+
+</details>
+
 and fixes the following bugs:
 
 **Mirroring** - github-to-gitea's errors in a run of 942 repositories.
