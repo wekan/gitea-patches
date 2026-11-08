@@ -571,12 +571,14 @@ fsf.token_forms.clear()
 seen = {}
 sign_in_with(lambda text: seen.update(printed_query(text)) or f"https://localhost/?code=C1&state={seen['state']}")
 tf = fsf.token_forms[0]
-check("SourceForge sign-in: the authorize address has client_id, response_type=code, redirect_uri and S256 PKCE",
-      seen.get("client_id") == "cid" and seen.get("response_type") == "code" and seen.get("redirect_uri") == "https://localhost/"
+check("SourceForge sign-in: the authorize address has client_id, response_type=code and S256 PKCE",
+      seen.get("client_id") == "cid" and seen.get("response_type") == "code"
       and seen.get("code_challenge_method") == "S256" and len(seen.get("state", "")) >= 16)
+check("SourceForge sign-in: by default no redirect_uri is sent, so SourceForge uses the application's own",
+      "redirect_uri" not in seen and "redirect_uri" not in fsf.token_forms[0])
 check("SourceForge sign-in: the code is exchanged at /rest/oauth2/token with the client's id and secret",
       tf.get("grant_type") == "authorization_code" and tf.get("code") == "C1" and tf.get("client_id") == "cid"
-      and tf.get("client_secret") == "csecret" and tf.get("redirect_uri") == "https://localhost/")
+      and tf.get("client_secret") == "csecret")
 import base64 as _b64
 import hashlib as _hl
 check("SourceForge sign-in: the code_verifier matches the code_challenge (S256)",
@@ -636,7 +638,35 @@ try:
 except SystemExit as err:
     refused = "https://" in str(err)
 check("negative: a redirect_uri that is not https:// is refused (SourceForge requires it)", refused)
+oauth.set("sourceforge", "redirect_uri", "https://example.org/cb")
+fsf.token_forms.clear()
+seen = {}
+sign_in_with(lambda text: seen.update(printed_query(text)) or f"https://example.org/cb?code=C5&state={seen['state']}")
+check("SourceForge sign-in: a redirect_uri set in Settings is sent in both requests, the same",
+      seen.get("redirect_uri") == "https://example.org/cb" and fsf.token_forms[0].get("redirect_uri") == "https://example.org/cb")
+oauth.set("sourceforge", "redirect_uri", "")
+for label, answer_of in (("nothing pasted", lambda text: ""),
+                         ("the sign-in address itself pasted back", lambda text: re.search(r"https://sourceforge\.net/auth/oauth2/authorize\?\S+", text).group(0))):
+    fsf.token_forms.clear()
+    try:
+        sign_in_with(answer_of)
+        refused = False
+    except SystemExit as err:
+        refused = "paste" in str(err)
+    check(f"negative: sign-in refuses {label}, says what to paste, and asks SourceForge for nothing", refused and not fsf.token_forms)
+help_text = sign_in_with(lambda text: "C6")
+check("SourceForge sign-in: the help says what to do on 'Mismatching redirect URI'", "Mismatching redirect URI" in help_text)
+# The earlier default https://localhost/ is emptied once; a value chosen after that stays.
+oauth.remove_option("migrations", "sourceforge_redirect_uri_registered")
 oauth.set("sourceforge", "redirect_uri", "https://localhost/")
+s.t.configure(s)
+check("SourceForge: the earlier default redirect_uri https://localhost/ is emptied once", s.t.redirect_uri == ""
+      and oauth.get("migrations", "sourceforge_redirect_uri_registered") == "done")
+oauth.set("sourceforge", "redirect_uri", "https://localhost/")
+s.t.configure(s)
+check("SourceForge: ... and https://localhost/ chosen after that stays", s.t.redirect_uri == "https://localhost/")
+oauth.set("sourceforge", "redirect_uri", "")
+s.t.configure(s)
 oauth.set("sourceforge_oauth2", "access_token", "bad token\r\nX-Evil: 1")
 try:
     s.t.configure(s)

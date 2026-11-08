@@ -168,16 +168,20 @@ are created by the script.
 gitea-to-sourceforge signs in to SourceForge with OAuth2, as an application of your
 own:
 
-1. At <https://sourceforge.net/auth/oauth/> register an **OAuth2 application** with
-   the redirect URL `https://localhost/`. SourceForge takes only `https://` addresses,
-   and the one the script sends must be exactly the same: another address goes in
-   the setting `redirect_uri`.
+1. At <https://sourceforge.net/auth/oauth/> register an **OAuth2 application** with a
+   redirect URL, for example `https://localhost/`. SourceForge takes only `https://`
+   addresses.
 2. Put the application's **Client ID** and **Client Secret** in Settings
-   (`client_id`, `client_secret`; the secret is masked in the menu).
+   (`client_id`, `client_secret`; the secret is masked in the menu). Leave
+   `redirect_uri` empty: the script then sends none, and SourceForge uses the
+   application's first redirect URL, so the two always match. Set it only to choose
+   another URL of the same application, written exactly as it is registered. Any
+   other address gets "Mismatching redirect URI".
 3. Choose **10) Sign in to SourceForge**, open the address it shows, and press
-   Authorize. The browser then goes to `https://localhost/?code=...&state=...`.
-   Nothing answers there, so the page does not load, but the code is in its address:
-   copy the whole address from the address bar and paste it into the script.
+   Authorize. The browser then goes to the redirect URL with `?code=...&state=...` at
+   its end. For `https://localhost/` nothing answers, so the page does not load, but
+   the code is in its address: copy that whole address from the address bar (not the
+   sign-in address) and paste it into the script.
 
 The script exchanges the code (with PKCE) for an access token and a refresh token
 and saves them in `gitea-to-sourceforge.ini` (mode 600) under

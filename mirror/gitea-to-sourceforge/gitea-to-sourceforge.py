@@ -34,9 +34,10 @@ SOURCEFORGE - the same layout as WeKan's releases/mirror.sh, so both find each o
     SourceForge's wiki is not a git repository, so the wiki is not mirrored.
 
 SIGNING IN - an OAuth2 application of your own
-  1. At https://sourceforge.net/auth/oauth/ register an OAuth2 application, with the
-     redirect URL https://localhost/ (or the one in setting redirect_uri: it must be
-     https:// and exactly the same).
+  1. At https://sourceforge.net/auth/oauth/ register an OAuth2 application, with a
+     redirect URL such as https://localhost/ (SourceForge takes only https://). The
+     script sends none, so SourceForge uses the application's first redirect URL; the
+     setting redirect_uri names another of them, exactly as registered.
   2. Put its Client ID and Client Secret in the settings (client_id, client_secret).
   3. Menu 10) Sign in to SourceForge: open the address it shows, authorize, and paste
      the address the browser then goes to - a page that does not load is fine, the
@@ -131,8 +132,8 @@ class SourceForge:
     SETTINGS = [
         ("sourceforge", "client_id", "", "Client ID of your OAuth2 application at https://sourceforge.net/auth/oauth/"),
         ("sourceforge", "client_secret", "", "Client Secret of the same OAuth2 application"),
-        ("sourceforge", "redirect_uri", "https://localhost/",
-         "redirect URL registered in the application (https://, exactly the same); then menu 10) Sign in"),
+        ("sourceforge", "redirect_uri", "",
+         "empty = the application's own (first) redirect URL; else one registered there, exactly the same"),
         ("sourceforge", "user", "", "SourceForge user name for ssh: git push and release files (your SSH key)"),
         ("sourceforge", "project", "{owner}", "SourceForge project of a Gitea owner without a Destinations line"),
         ("sourceforge", "files_dir", "GitHub-releases", "directory of release files in the project's Files (WeKan's mirror uses GitHub-releases)"),
@@ -149,16 +150,26 @@ class SourceForge:
         self.e = e
         self.client_id = e.cfg.get("client_id", "sourceforge").strip()
         self.client_secret = e.cfg.get("client_secret", "sourceforge").strip()
-        self.redirect_uri = e.cfg.get("redirect_uri", "sourceforge").strip() or "https://localhost/"
+        cfg = e.cfg.cfg
+        # redirect_uri was https://localhost/ by default, and SourceForge refuses it
+        # ("Mismatching redirect URI") unless the application registered exactly that.
+        # Now empty is the default - the application's own - and the old default goes, once.
+        if not cfg.has_option("migrations", "sourceforge_redirect_uri_registered"):
+            if cfg.get("sourceforge", "redirect_uri", fallback="").strip() == "https://localhost/":
+                cfg.set("sourceforge", "redirect_uri", "")
+            if not cfg.has_section("migrations"):
+                cfg.add_section("migrations")
+            cfg.set("migrations", "sourceforge_redirect_uri_registered", "done")
+            e.cfg.save()
+        self.redirect_uri = e.cfg.get("redirect_uri", "sourceforge").strip()
         self.files_dir = e.cfg.get("files_dir", "sourceforge").strip("/") or "GitHub-releases"
         self.open_status = e.cfg.get("open_status", "sourceforge") or "open"
         self.closed_status = e.cfg.get("closed_status", "sourceforge") or "closed"
         self.user = e.cfg.get("user", "sourceforge")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.user):
             raise SystemExit("[sourceforge] user is not a valid SourceForge user name")
-        if not self.redirect_uri.startswith("https://"):
+        if self.redirect_uri and not self.redirect_uri.startswith("https://"):
             raise SystemExit("[sourceforge] redirect_uri must begin with https://, as SourceForge requires")
-        cfg = e.cfg.cfg
         old = cfg.get("sourceforge", "token", fallback="").strip()
         if cfg.has_option("sourceforge", "token"):
             # A bearer token made by hand (the earlier setting token) still works until it
@@ -226,23 +237,34 @@ class SourceForge:
         if missing:
             raise SystemExit(f"Missing {', '.join(missing)}: register an OAuth2 application at "
                              "https://sourceforge.net/auth/oauth/ and put them in Settings")
-        if not getattr(self, "e", None):
-            self.configure(e)
+        self.configure(e)  # the settings as they are now
         state = secrets.token_urlsafe(16)
         verifier, challenge = pkce_pair()
+        # Without redirect_uri, SourceForge (oauthlib) uses the application's first
+        # registered one in both requests, so they always match it.
+        redirect = {"redirect_uri": self.redirect_uri} if self.redirect_uri else {}
         url = AUTHORIZE + "?" + urllib.parse.urlencode({
-            "client_id": self.client_id, "response_type": "code", "redirect_uri": self.redirect_uri,
+            "client_id": self.client_id, "response_type": "code", **redirect,
             "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+        where = self.redirect_uri or "the application's redirect URL"
         print(f"""
 Open this address in a browser, sign in to SourceForge and press Authorize:
 
   {url}
 
-The browser then goes to {self.redirect_uri}?code=... - the page may not load, that is
-fine. Copy the whole address from the browser's address bar and paste it here.""")
-        code = code_from(gm.ask("Address (or the code alone)"), state)
-        self.token_request({"grant_type": "authorization_code", "code": code,
-                            "redirect_uri": self.redirect_uri, "code_verifier": verifier})
+The browser then goes to {where} with ?code=...&state=... at its end - the page may
+not load, that is fine. Copy that whole address from the browser's address bar (not
+the address above) and paste it here.
+If SourceForge says "Mismatching redirect URI": empty the setting redirect_uri, or
+set it exactly as the application's redirect URL at https://sourceforge.net/auth/oauth/.""")
+        answer = gm.ask("Address (or the code alone)")
+        if not answer.strip():
+            raise SystemExit("Nothing pasted: sign in again (menu 10) and paste the address the browser went to")
+        if answer.strip().startswith(AUTHORIZE):
+            raise SystemExit("That is the sign-in address itself: paste the address the browser went to "
+                             "after Authorize, the one with ?code=")
+        code = code_from(answer, state)
+        self.token_request({"grant_type": "authorization_code", "code": code, **redirect, "code_verifier": verifier})
         gm.log("Signed in to SourceForge: the access token and refresh token are saved in "
                f"{os.path.basename(e.ini)} [{OAUTH_SECTION}].")
 
