@@ -612,9 +612,21 @@ def ensure_migrated(state, replace_broken):
 
 # --- 2. git refs ----------------------------------------------------------------
 
-def find_bare(path=None):
+def bare_paths(path=None):
+    """Where Gitea's bare repository can be. Gitea keeps it in lower case -
+    gitea-repositories/xet7/neonnoir.git for xet7/NEONnoir - so that name comes first,
+    then the name as written."""
+    out = []
     for p in [path or opt("bare_repo")] + BARE_CANDIDATES:
-        p = os.path.expanduser(p.format(owner=OWNER, name=NAME))
+        for owner, name in ((OWNER.lower(), NAME.lower()), (OWNER, NAME)):
+            q = os.path.expanduser(p.format(owner=owner, name=name))
+            if q not in out:
+                out.append(q)
+    return out
+
+
+def find_bare(path=None):
+    for p in bare_paths(path):
         if os.path.isdir(p) and os.path.exists(os.path.join(p, "HEAD")):
             return p
     return None
@@ -622,7 +634,8 @@ def find_bare(path=None):
 
 def fetch_git(bare):
     if not bare:
-        log(f"Gitea's bare repository is not on this machine (setting bare_repo: {opt('bare_repo')}); skipping git fetch.")
+        log(f"Gitea's bare repository is not on this machine (setting bare_repo: {opt('bare_repo')}; "
+            f"looked at {bare_paths()[0]}); skipping git fetch.")
         return
     log(f"git fetch from GitHub -> {bare}")
     cmd = ["git", "-C", bare, "fetch", "--quiet", f"https://github.com/{GITHUB_REPO}.git",

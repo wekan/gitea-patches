@@ -17,6 +17,7 @@ path = os.path.join(ROOT, "mirror", "github-to-gitea", "github-to-gitea.py")
 spec = importlib.util.spec_from_file_location("github_to_gitea", path)
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
+real_find_bare = g.find_bare
 failures = 0
 
 
@@ -155,6 +156,27 @@ def real_pages(method, p, body=None, repo=None, **kw):
 
 g.gitea = real_pages
 check("three full pages and an empty one are all read", [i["id"] for i in g.gt_all("/labels")] == list(range(150)))
+
+# find_bare: Gitea keeps the bare repository in lower case - xet7/NEONnoir is
+# gitea-repositories/xet7/neonnoir.git - and the git step skipped every repository
+# whose owner or name has a capital letter.
+import configparser
+repos = os.path.join(TMP, "gitea-repositories")
+os.makedirs(os.path.join(repos, "xet7", "neonnoir.git"))
+open(os.path.join(repos, "xet7", "neonnoir.git", "HEAD"), "w").write("ref: refs/heads/main\n")
+g.CFG = configparser.ConfigParser(interpolation=None)
+g.CFG.read_dict({"options": {"bare_repo": repos + "/{owner}/{name}.git"}})
+g.BARE_CANDIDATES = []
+g.find_bare = real_find_bare
+g.OWNER, g.NAME = "xet7", "NEONnoir"
+check("xet7/NEONnoir is found as Gitea keeps it: xet7/neonnoir.git",
+      g.find_bare() == os.path.join(repos, "xet7", "neonnoir.git"))
+os.makedirs(os.path.join(repos, "wekan", "Wekan.git"))
+open(os.path.join(repos, "wekan", "Wekan.git", "HEAD"), "w").write("x\n")
+g.OWNER, g.NAME = "wekan", "Wekan"
+check("a path written with capitals is still found", g.find_bare() == os.path.join(repos, "wekan", "Wekan.git"))
+g.OWNER, g.NAME = "xet7", "Missing"
+check("negative: a repository not on the disk is None", g.find_bare() is None)
 
 print()
 print(f"{failures} failure(s)")
