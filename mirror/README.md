@@ -165,6 +165,19 @@ A missing GitLab project is created, in a group that must exist. A SourceForge p
 cannot be created through its API: make it at sourceforge.net; its Git and Tracker tools
 are created by the script.
 
+gitea-to-sourceforge uses SourceForge's REST API as
+[sourceforge.net/api-docs](https://sourceforge.net/api-docs/) documents it:
+`[sourceforge] token` is an OAuth bearer token - hexadecimal, made at
+<https://sourceforge.net/auth/oauth/> - sent as `Authorization: Bearer <token>`;
+tools are created with `admin/install_tool`; tickets are listed at
+`/p/<project>/<tracker>`, created with `new` and saved with `<number>/save` as
+`multipart/form-data` (booleans `true`/`false`, custom fields
+`ticket_form.custom_fields._<name>`), and comments posted to the ticket's
+`_discuss/thread/<id>/new`. **Check access** asks `has_access?perm=admin` whether the
+token may administer the project, which creating tools needs. The API has no file
+releases, so release files go over sftp to `frs.sourceforge.net`, the way SourceForge
+documents it, and git over SSH to `git.code.sf.net`.
+
 ## Working with WeKan's releases/mirror.sh
 
 Every copied issue, comment and release carries `<!-- wekan-mirror:URL -->`, the marker

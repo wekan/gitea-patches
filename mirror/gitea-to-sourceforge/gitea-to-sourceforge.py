@@ -45,13 +45,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 import gitea_mirror as gm  # noqa: E402
 
+# SourceForge's REST API, as https://sourceforge.net/api-docs/ documents it: an OAuth
+# bearer token (hexadecimal, from https://sourceforge.net/auth/oauth/), tickets created
+# and saved as multipart/form-data, comments posted as a urlencoded form. The API has no
+# file releases: those go over sftp to frs.sourceforge.net, as SourceForge documents.
 REST = "https://sourceforge.net/rest/p"
+TOKEN_FORMAT = re.compile(r"[0-9a-f]+")
 
 
 def mount(name, suffix=""):
     """The mount point WeKan's tools/mirror-repository.mjs sourceForgeMount() gives."""
     value = f"{name}{suffix}"
     return f"repo-{re.sub(r'[^A-Za-z0-9-]', '-', value)[:60]}-{hashlib.sha256(value.encode()).hexdigest()[:8]}"
+
+
+def tf(value):
+    """A boolean as the API takes it: "true" or "false"."""
+    return "true" if value else "false"
 
 
 def quoted(path):
@@ -95,6 +105,9 @@ class SourceForge:
         self.user = e.cfg.get("user", "sourceforge")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.user):
             raise SystemExit("[sourceforge] user is not a valid SourceForge user name")
+        if self.token and not TOKEN_FORMAT.fullmatch(self.token):
+            raise SystemExit("[sourceforge] token is not a SourceForge bearer token (hexadecimal): "
+                             "make one at https://sourceforge.net/auth/oauth/")
         self.files_dir = e.cfg.get("files_dir", "sourceforge").strip("/") or "GitHub-releases"
         self.open_status = e.cfg.get("open_status", "sourceforge") or "open"
         self.closed_status = e.cfg.get("closed_status", "sourceforge") or "closed"
@@ -113,12 +126,14 @@ class SourceForge:
         return "code" if name == project else mount(name)
 
     # REST
-    def call(self, method, path, form=None):
+    def call(self, method, path, form=None, multipart=False):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        if multipart:
+            return gm.http(method, f"{REST}/{path}", headers, form=form, multipart=True)
         return gm.http(method, f"{REST}/{path}", headers, form=form)
 
-    def ok(self, method, path, form=None):
-        status, data, _ = self.call(method, path, form)
+    def ok(self, method, path, form=None, multipart=False):
+        status, data, _ = self.call(method, path, form, multipart)
         if status not in (200, 201):
             raise RuntimeError(f"SourceForge {method} {path}: {status} {gm.message(data)}")
         if isinstance(data, dict) and data.get("success") is False:
@@ -208,7 +223,7 @@ class SourceForge:
         # remembers which ticket each item became and this is not needed again.
         out = {}
         base = f"{tracker['project']}/{tracker['mount']}"
-        for t in self.pages(f"{base}/", "tickets"):
+        for t in self.pages(base, "tickets"):
             detail = self.ok("GET", f"{base}/{t['ticket_num']}").get("ticket") or {}
             url = gm.marker_of(detail.get("description"))
             if url:
@@ -220,7 +235,7 @@ class SourceForge:
         res = self.ok("POST", f"{tracker['project']}/{tracker['mount']}/new", {
             "ticket_form.summary": title[:250], "ticket_form.description": body,
             "ticket_form.labels": ",".join(l["name"] for l in data.get("labels") or []),
-            "ticket_form.status": self.open_status})
+            "ticket_form.status": self.open_status}, multipart=True)
         num = (res.get("ticket") or {}).get("ticket_num") or res.get("ticket_num")
         if not num:
             raise RuntimeError("SourceForge did not return the new ticket's number")
@@ -252,11 +267,13 @@ class SourceForge:
         form = {"ticket_form.summary": full.get("summary") or "", "ticket_form.description": full.get("description") or "",
                 "ticket_form.status": self.closed_status, "ticket_form.labels": ",".join(full.get("labels") or []),
                 "ticket_form.assigned_to": full.get("assigned_to") or "",
-                "ticket_form.private": str(bool(full.get("private"))),
-                "ticket_form.discussion_disabled": str(bool(full.get("discussion_disabled")))}
+                "ticket_form.private": tf(full.get("private")),
+                "ticket_form.discussion_disabled": tf(full.get("discussion_disabled"))}
         for k, v in (full.get("custom_fields") or {}).items():
-            form[f"ticket_form.custom_fields.{k}"] = "" if v is None else str(v)
-        self.ok("POST", f"{tracker['project']}/{tracker['mount']}/{num}/save", form)
+            # The API names a custom field ticket_form.custom_fields._<name>.
+            name = k if k.startswith("_") else f"_{k}"
+            form[f"ticket_form.custom_fields.{name}"] = "" if v is None else (tf(v) if isinstance(v, bool) else str(v))
+        self.ok("POST", f"{tracker['project']}/{tracker['mount']}/{num}/save", form, multipart=True)
 
     def rewrite(self, tracker, repo, text):
         # Links into the local Gitea point to its public address instead.
@@ -330,6 +347,13 @@ class SourceForge:
         for p in projects:
             status, data, _ = self.call("GET", p)
             out.append((f"project {p}: " + ("found" if status == 200 else f"{status} {gm.message(data)}"), status == 200))
+            if status != 200:
+                continue
+            # The token may create tools (admin/install_tool) only for a project admin.
+            status, data, _ = self.call("GET", f"{p}/has_access?user={self.user}&perm=admin")
+            admin = status == 200 and isinstance(data, dict) and data.get("result") is True
+            out.append((f"project {p}: the token " + ("may administer it" if admin else
+                        f"may not administer it ({status} {gm.message(data)}): tools cannot be created"), admin))
         try:
             self.sftp("pwd\n")
             out.append((f"sftp {self.user}@frs.sourceforge.net: SSH key accepted", True))

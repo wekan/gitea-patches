@@ -389,15 +389,27 @@ class FakeSF(Fake):
         super().__init__()
         self.tools = [{"mount_point": "code", "name": "git"}]
         self.tickets, self.saved, self.files = {}, [], {}
+        self.encodings, self.auth, self.admin, self.paths = {}, set(), True, []
 
-    def __call__(self, method, url, headers=None, json_body=None, form=None, body=None, timeout=600, retry=None):
+    def __call__(self, method, url, headers=None, json_body=None, form=None, body=None, timeout=600, retry=None, multipart=False):
         u = urllib.parse.urlsplit(url)
         if u.netloc == "gitea.test":
             return super().__call__(method, url, headers, json_body, form, body, timeout, retry)
         path, q = urllib.parse.unquote(u.path).removeprefix("/rest/p/"), dict(urllib.parse.parse_qsl(u.query))
-        self.writes.append((method, path)) if method != "GET" else None
+        self.auth.add((headers or {}).get("Authorization"))
+        self.paths.append(path)
+        if method != "GET":
+            self.writes.append((method, path))
+            # https://sourceforge.net/api-docs/: tickets' new and save are multipart/form-data.
+            self.encodings.setdefault(path.rsplit("/", 1)[-1] if re.search(r"/(new|save)$", path) and "_discuss" not in path
+                                      else "other", set()).add("multipart" if multipart else "urlencoded")
         if path == "wekan":
             return 200, {"tools": self.tools}, {}
+        if path == "wekan/has_access":
+            return (200, {"result": True}, {}) if self.admin else (403, {"error": "forbidden"}, {})
+        if re.fullmatch(r"wekan/[\w-]+", path):
+            p = int(q.get("page", 0))
+            return 200, {"tickets": [{"ticket_num": n} for n in self.tickets][p * 100:(p + 1) * 100]}, {}
         if path == "wekan/admin/install_tool":
             self.tools.append({"mount_point": form["mount_point"], "name": form["tool"]})
             return 200, {"success": True}, {}
@@ -409,9 +421,6 @@ class FakeSF(Fake):
                                "status": form["ticket_form.status"], "labels": form["ticket_form.labels"].split(",") if form["ticket_form.labels"] else [],
                                "discussion_thread": {"_id": f"t{n}"}, "posts": []}
             return 200, {"ticket": {"ticket_num": n}}, {}
-        if rest == "":
-            p = int(q.get("page", 0))
-            return 200, {"tickets": [{"ticket_num": n} for n in self.tickets][p * 100:(p + 1) * 100]}, {}
         m = re.fullmatch(r"(\d+)(/save)?", rest)
         if m:
             t = self.tickets[int(m.group(1))]
@@ -433,7 +442,7 @@ fsf = FakeSF()
 gm.http = fsf
 s = gm.Engine(sf_mod.SourceForge(), sf_here)
 s.cfg.load()
-for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "sf"), ("sourceforge", "user", "wekan")):
+for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "0123abcd"), ("sourceforge", "user", "wekan")):
     s.cfg.set(sec, k, v)
 s.configure()
 s.load_state()
@@ -460,6 +469,14 @@ check("SourceForge: both items become tickets, the PR titled [PR]",
       sorted(t["summary"] for t in fsf.tickets.values()) == ["First", "[PR] A PR"])
 first = next(t for t in fsf.tickets.values() if t["summary"] == "First")
 check("SourceForge: comments are added with their markers", len(first["posts"]) == 2 and "issuecomment-11 -->" in first["posts"][1]["text"])
+check("SourceForge: tickets are created and saved as multipart/form-data (api-docs)",
+      fsf.encodings.get("new") == {"multipart"} and fsf.encodings.get("save") == {"multipart"})
+check("SourceForge: comments and tools are posted urlencoded (api-docs)", fsf.encodings.get("other") == {"urlencoded"})
+check("SourceForge: every request carries the bearer token", fsf.auth == {"Bearer 0123abcd"})
+check("SourceForge: the ticket list is read at /p/<project>/<tracker>, without a trailing slash",
+      bool(fsf.tickets) and not [x for x in fsf.paths if x.endswith("/")] and any(re.fullmatch(r"wekan/[\w-]+", x) for x in fsf.paths))
+check("SourceForge: booleans are saved as \"true\"/\"false\"",
+      fsf.saved and fsf.saved[0]["ticket_form.private"] == "false" and fsf.saved[0]["ticket_form.discussion_disabled"] == "false")
 check("SourceForge: closing saves the whole form, not only the status",
       fsf.saved and fsf.saved[0]["ticket_form.status"] == "closed" and fsf.saved[0]["ticket_form.summary"] == "First")
 put = [x for x in scripts if "put " in x]
@@ -478,6 +495,46 @@ check("SourceForge: avatars are reported once as not possible, not failed", s.co
 s.counts = {}
 check("negative: SourceForge refuses a private repository", s.t.ensure_repo("wekan", fsf.repos["wekan/secret"]) is None
       and s.counts.get("skipped") == 1)
+
+# Custom fields as the API names them: ticket_form.custom_fields._<name>, booleans "true"/"false".
+fsf.tickets[1]["custom_fields"] = {"_milestone": "v1", "priority": "5", "_done": True}
+fsf.saved.clear()
+s.t.close_issue({"project": "wekan", "mount": "x"}, 1)
+cf = {k: v for k, v in fsf.saved[0].items() if k.startswith("ticket_form.custom_fields.")}
+check("SourceForge: custom fields are saved as ticket_form.custom_fields._<name>",
+      cf == {"ticket_form.custom_fields._milestone": "v1", "ticket_form.custom_fields._priority": "5",
+             "ticket_form.custom_fields._done": "true"})
+
+# multipart/form-data as sent: every field a part, the value unchanged.
+mp_body, mp_type = gm.multipart_form({"ticket_form.summary": "Ä title", "ticket_form.private": "false"})
+import email.parser
+msg = email.parser.BytesParser().parsebytes(b"Content-Type: " + mp_type.encode() + b"\r\n\r\n" + mp_body)
+parts = {pt.get_param("name", header="content-disposition"): pt.get_payload(decode=True).decode() for pt in msg.get_payload()}
+check("gm.multipart_form encodes each field as a form-data part", mp_type.startswith("multipart/form-data; boundary=")
+      and parts == {"ticket_form.summary": "Ä title", "ticket_form.private": "false"})
+
+# check_online asks has_access whether the token may administer the project (install_tool needs it).
+s.cfg.set("sources", "list", "wekan")
+s.t.sftp = lambda script: ""
+res = s.t.check_online(s)
+check("SourceForge: Check access says the token may administer the project", any("may administer" in m and good for m, good in res))
+fsf.admin = False
+res = s.t.check_online(s)
+check("negative: Check access reports a token that may not administer the project",
+      any("may not administer" in m and not good for m, good in res))
+check("... asked with has_access?user=<user>&perm=admin", "wekan/has_access" in fsf.paths)
+s.t.sftp = fake_sftp
+
+# negative: a token that is not a SourceForge bearer token is refused before any request.
+s.cfg.set("sourceforge", "token", "Bearer not-hex!")
+try:
+    s.t.configure(s)
+    refused = False
+except SystemExit as err:
+    refused = "hexadecimal" in str(err)
+check("negative: a token that is not hexadecimal is refused", refused)
+s.cfg.set("sourceforge", "token", "0123abcd")
+s.t.configure(s)
 
 # --- releases: only the newest, unless "Releases kept in full" lists the repository ----------
 def three_releases(f):
@@ -599,7 +656,7 @@ gm.http = fsf2
 os.makedirs(os.path.join(TMP, "sf2"))
 s2 = gm.Engine(sf_mod.SourceForge(), os.path.join(TMP, "sf2"))
 s2.cfg.load()
-for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "sf"), ("sourceforge", "user", "wekan")):
+for sec, k, v in (("gitea", "url", GITEA), ("gitea", "token", "t"), ("sourceforge", "token", "0123abcd"), ("sourceforge", "user", "wekan")):
     s2.cfg.set(sec, k, v)
 s2.configure()
 s2.load_state()

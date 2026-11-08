@@ -263,7 +263,15 @@ def rate_wait(headers, waits):
     return min(60 * 2 ** waits, 900)
 
 
-def http(method, url, headers=None, json_body=None, form=None, body=None, timeout=600, retry=None):
+def multipart_form(form):
+    """(body bytes, Content-Type) of a multipart/form-data form of text fields."""
+    b = uuid.uuid4().hex
+    out = b"".join(f"--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n".encode()
+                   + str(v).encode() + b"\r\n" for k, v in form.items())
+    return out + f"--{b}--\r\n".encode(), f"multipart/form-data; boundary={b}"
+
+
+def http(method, url, headers=None, json_body=None, form=None, body=None, timeout=600, retry=None, multipart=False):
     """(status, decoded answer, response headers). A 429 - or a 403 that says it is a rate
     limit - is waited out and does not count as an attempt. Errors of the server or the
     network are retried only for requests that can be repeated safely (GET, HEAD, PUT,
@@ -276,6 +284,8 @@ def http(method, url, headers=None, json_body=None, form=None, body=None, timeou
     if json_body is not None:
         data = json.dumps(json_body).encode()
         h["Content-Type"] = "application/json"
+    elif form is not None and multipart:
+        data, h["Content-Type"] = multipart_form(form)
     elif form is not None:
         data = urllib.parse.urlencode(form).encode()
         h["Content-Type"] = "application/x-www-form-urlencoded"
