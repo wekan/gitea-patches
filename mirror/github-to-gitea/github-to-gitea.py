@@ -104,7 +104,7 @@ SETTINGS = [
     ("options", "release_assets", "github", "release files: github (download from GitHub) | local (assets_dir) | none"),
     ("options", "release_assets_keep", "newest", "releases that keep their files: newest | all | N (the N newest); the files of older releases are deleted from Gitea"),
     ("options", "assets_dir", "", "directory <tag>/<files> (release_assets = local); {owner} {name} allowed"),
-    ("options", "assets_max_mb", "0", "largest release file to upload, in MB; 0 = no limit (Gitea: [repository.release] FILE_MAX_SIZE)"),
+    ("options", "assets_max_mb", "-1", "largest release file to upload, in MB; -1 = no limit, 0 = no files (as Gitea's [repository.release] FILE_MAX_SIZE)"),
     ("options", "bare_repo", "~/gitea/data/gitea-repositories/{owner}/{name}.git",
      "Gitea's bare repositories on this machine ({owner} {name}); git fetch only when found"),
     ("options", "actions_branch", "gitea-actions", "branch the converted workflows are written to"),
@@ -373,15 +373,18 @@ def load_config():
         if not CFG.has_option(s, k):
             CFG.set(s, k, d)
             added = True
-    # assets_max_mb was 2048 by default, Gitea's default release file limit; now it is
-    # 0, no limit. A file written with the old default gets the new one, once (the
-    # [migrations] line), so 2048 chosen again afterwards stays.
-    if not CFG.has_option("migrations", "assets_max_mb_unlimited"):
-        if CFG.get("options", "assets_max_mb", fallback="").strip() == "2048":
-            CFG.set("options", "assets_max_mb", "0")
+    # assets_max_mb was 2048 by default, Gitea's default release file limit; then 0
+    # meant no limit for a while. Now -1 is no limit, the default, as in Gitea's
+    # FILE_MAX_SIZE, and 0 is a largest size of 0: no file is uploaded. A file written
+    # with 2048 or 0 gets -1, once (the [migrations] line), so a value chosen after
+    # that stays.
+    if not CFG.has_option("migrations", "assets_max_mb_no_limit"):
+        if CFG.get("options", "assets_max_mb", fallback="").strip() in ("2048", "0"):
+            CFG.set("options", "assets_max_mb", "-1")
         if not CFG.has_section("migrations"):
             CFG.add_section("migrations")
-        CFG.set("migrations", "assets_max_mb_unlimited", "done")
+        CFG.remove_option("migrations", "assets_max_mb_unlimited")
+        CFG.set("migrations", "assets_max_mb_no_limit", "done")
         added = True
     if CFG.get("options", "steps", fallback="").strip() == OLD_DEFAULT_STEPS:
         CFG.set("options", "steps", ", ".join(STEPS))
@@ -1095,18 +1098,33 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
 NO_AUTH_REDIRECT = urllib.request.build_opener(_DropAuthOnRedirect)
 
 
+def assets_limit():
+    """assets_max_mb in bytes, as Gitea reads FILE_MAX_SIZE: None for a negative value
+    (-1, the default: no limit), 0 for 0 (no file is uploaded)."""
+    try:
+        mb = int((opt("assets_max_mb") or "-1").strip())
+    except ValueError:
+        mb = -1
+    return None if mb < 0 else mb * 1048576
+
+
+def too_large(limit, size):
+    return limit is not None and (limit == 0 or size > limit)
+
+
 def upload_asset(cur, tag, name, path, url, size=0):
     """One file to the Gitea release. A file from GitHub is downloaded alone to
     mirror_tmp_dir(), uploaded, and deleted - also when the upload fails - so at most
     one release file is on the disk at a time."""
-    limit = int(opt("assets_max_mb") or 0) * 1024 * 1024
+    limit = assets_limit()
     if DRY:
         log(f"    [dry-run] upload {tag}/{name}")
         return
     downloaded = None
     if path is None:
-        if limit and size > limit:
-            log(f"  {tag}: {name} skipped ({size // 1048576} MB > assets_max_mb)")
+        if too_large(limit, size):
+            log(f"  {tag}: {name} skipped " + ("(assets_max_mb = 0: no files)" if limit == 0 else
+                                               f"({size // 1048576} MB > assets_max_mb)"))
             return
         tmpdir = mirror_tmp_dir()
         os.makedirs(tmpdir, exist_ok=True)
@@ -1122,7 +1140,7 @@ def upload_asset(cur, tag, name, path, url, size=0):
         except BaseException:
             _remove(downloaded)
             raise
-    elif limit and os.path.getsize(path) > limit:
+    elif too_large(limit, os.path.getsize(path)):
         log(f"  {tag}: {name} skipped (over assets_max_mb)")
         return
     try:
@@ -1864,6 +1882,9 @@ def menu_settings():
                     continue
             if k == "release_assets" and v not in ("none", "local", "github"):
                 print("The value is github, local or none.")
+                continue
+            if k == "assets_max_mb" and not re.fullmatch(r"-1|\d+", v.strip()):
+                print("The value is -1 (no limit), 0 (no files) or the largest size in MB.")
                 continue
             if k == "release_assets_keep" and not (v in ("newest", "all") or (v.isdigit() and int(v) > 0)):
                 print("The value is newest, all, or how many of the newest releases (1, 2, 3...).")

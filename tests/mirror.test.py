@@ -604,19 +604,32 @@ check("without MIRROR_TMP_DIR, files go to WeKan's .tools/tmp/<script>",
 os.environ["MIRROR_TMP_DIR"] = os.path.join(TMP, "mirror-tmp")
 
 # Release files of any size by default; the old default 5000 becomes 0, once.
-check("gitea-to-*: assets_max_mb's default is 0, no limit", e3.cfg.get("assets_max_mb") == "0")
-for content, want in (("[options]\nassets_max_mb = 5000\n", "0"), ("[options]\nassets_max_mb = 300\n", "300"),
-                      ("[options]\nassets_max_mb = 5000\n[migrations]\nassets_max_mb_unlimited = done\n", "5000")):
+check("gitea-to-*: assets_max_mb's default is -1, no limit", e3.cfg.get("assets_max_mb") == "-1")
+for content, want in (("[options]\nassets_max_mb = 5000\n", "-1"), ("[options]\nassets_max_mb = 300\n", "300"),
+                      ("[options]\nassets_max_mb = 0\n[migrations]\nassets_max_mb_unlimited = done\n", "-1"),
+                      ("[options]\nassets_max_mb = 0\n[migrations]\nassets_max_mb_no_limit = done\n", "0"),
+                      ("[options]\nassets_max_mb = 5000\n[migrations]\nassets_max_mb_no_limit = done\n", "5000")):
     d = os.path.join(TMP, "ini-" + str(abs(hash(content))))
     os.makedirs(d)
     m = gm.Engine(gl_mod.GitLab(), d)
     with open(m.ini, "w") as f:
         f.write(content)
     m.cfg.load()
-    check(f"gitea-to-*: {content.split(chr(10))[1]}" + (" after the migration" if "done" in content else "") + f" -> {want}",
+    check(f"gitea-to-*: {content.split(chr(10))[1]}" + (" after the migration" if "no_limit = done" in content else
+                                                      " from 0-is-no-limit" if "done" in content else "") + f" -> {want}",
           m.cfg.get("assets_max_mb") == want)
 m.cfg.load()
-check("gitea-to-*: the migration is saved, so it runs once", "assets_max_mb_unlimited = done" in open(m.ini).read())
+check("gitea-to-*: the migration is saved, so it runs once", "assets_max_mb_no_limit = done" in open(m.ini).read())
+
+# -1 copies any size, 0 copies no file, N skips a larger one.
+for value, want in (("-1", ["v3.zip"]), ("0", []), ("1", [])):
+    fz = FakeOld()
+    fz.releases[0]["assets"][0]["size"] = 5 * 1048576
+    ez = engine(fz, os.path.join(TMP, "glz" + value))
+    ez.cfg.set("options", "assets_max_mb", value)
+    ez.run(["releases"], "wekan/wekan")
+    check(f"gitea-to-*: assets_max_mb = {value} copies {want or 'no file'} of 5 MB",
+          [l["name"] for l in fz.gl_links.get("v3", [])] == want)
 
 print(f"\n{failures} failure(s)")
 subprocess.run(["rm", "-rf", TMP])

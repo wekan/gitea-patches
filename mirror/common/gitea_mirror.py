@@ -319,7 +319,7 @@ COMMON_SETTINGS = [
     ("options", "include_forks", "yes", "mirror forks"),
     ("options", "include_archived", "yes", "mirror archived repositories"),
     ("options", "wiki", "yes", "mirror the wiki, where the target has a git wiki"),
-    ("options", "assets_max_mb", "0", "largest release file to copy, in MB; 0 = no limit"),
+    ("options", "assets_max_mb", "-1", "largest release file to copy, in MB; -1 = no limit, 0 = no files"),
     ("options", "release_assets_keep", "newest", "releases synced, with their files, outside 'Releases kept in full': "
                                                  "newest | all | N (the N newest); older ones lose their files"),
 ]
@@ -340,15 +340,17 @@ class Config:
             if not self.cfg.has_option(section, "list"):
                 self.cfg.set(section, "list", "")
         added = False
-        # assets_max_mb was 5000 by default; now it is 0, no limit. A file written with
-        # the old default gets the new one, once (the [migrations] line), so 5000
-        # chosen again afterwards stays.
-        if not self.cfg.has_option("migrations", "assets_max_mb_unlimited"):
-            if self.cfg.get("options", "assets_max_mb", fallback="").strip() == "5000":
-                self.cfg.set("options", "assets_max_mb", "0")
+        # assets_max_mb was 5000 by default; then 0 meant no limit for a while. Now -1
+        # is no limit, the default, as in Gitea's FILE_MAX_SIZE, and 0 is a largest
+        # size of 0: no file is copied. A file written with 5000 or 0 gets -1, once
+        # (the [migrations] line), so a value chosen after that stays.
+        if not self.cfg.has_option("migrations", "assets_max_mb_no_limit"):
+            if self.cfg.get("options", "assets_max_mb", fallback="").strip() in ("5000", "0"):
+                self.cfg.set("options", "assets_max_mb", "-1")
             if not self.cfg.has_section("migrations"):
                 self.cfg.add_section("migrations")
-            self.cfg.set("migrations", "assets_max_mb_unlimited", "done")
+            self.cfg.remove_option("migrations", "assets_max_mb_unlimited")
+            self.cfg.set("migrations", "assets_max_mb_no_limit", "done")
             added = True
         for s, k, d, _ in self.settings:
             if not self.cfg.has_option(s, k):
@@ -407,6 +409,15 @@ class Config:
             if v in ("(allpublic)", "(allprivate)") and bool(repo.get("private")) == (v == "(allprivate)"):
                 return True
         return False
+
+    def assets_limit(self):
+        """assets_max_mb in bytes, as Gitea reads FILE_MAX_SIZE: None for a negative
+        value (-1, the default: no limit), 0 for 0 (no file is copied)."""
+        try:
+            mb = int((self.get("assets_max_mb") or "-1").strip())
+        except ValueError:
+            mb = -1
+        return None if mb < 0 else mb * 1048576
 
     def keep_count(self):
         """How many of the newest releases are synced with their files: None for all."""
@@ -793,7 +804,7 @@ class Engine:
         target = self.t.release_target(handle, repo)
         if target is None:
             return
-        limit = int(self.cfg.get("assets_max_mb") or 0) * 1048576
+        limit = self.cfg.assets_limit()
         for r in reversed(releases):  # oldest first
             tag = r["tag_name"]
             if tag not in keep:
@@ -812,7 +823,7 @@ class Engine:
                 for a in r.get("assets") or []:
                     if self.t.asset_name(a["name"]) in have:
                         continue
-                    if limit and a.get("size", 0) > limit:
+                    if limit is not None and (limit == 0 or a.get("size", 0) > limit):
                         self.record("skipped", f"{tag}/{a['name']}: {a['size'] // 1048576} MB > assets_max_mb")
                         continue
                     if self.dry:
@@ -1119,6 +1130,9 @@ def menu_settings(e):
                 if bad:
                     print(f"Unknown step: {', '.join(bad)}. Steps: {', '.join(STEPS)}")
                     continue
+            if k == "assets_max_mb" and not re.fullmatch(r"-1|\d+", v.strip()):
+                print("The value is -1 (no limit), 0 (no files) or the largest size in MB.")
+                continue
             e.cfg.set(s, k, v)
 
 

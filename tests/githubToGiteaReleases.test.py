@@ -126,12 +126,16 @@ check("negative: (allprivate) does not cover a public repository", run.created =
 up, dl, _ = run("newest", gitea_assets=set(), in_gitea=(), releases_all="wekan/wekan2")
 check("negative: a longer name is no match", run.created == ["v3"])
 
-# assets_max_mb: a file over it is skipped; 0 is no limit (Gitea's own limit is
-# [repository.release] FILE_MAX_SIZE).
+# assets_max_mb reads as Gitea's [repository.release] FILE_MAX_SIZE: -1 is no limit,
+# 0 is a largest size of 0 - no file - and a file over N MB is skipped.
 up, dl, _ = run("newest", gitea_assets=set(), max_mb="1", size=5 * 1048576)
 check("negative: a file over assets_max_mb is not uploaded", up == [])
-up, dl, _ = run("newest", gitea_assets=set(), max_mb="0", size=50 * 1024 ** 3)
-check("assets_max_mb = 0: a 50 GB file is uploaded", up == ["/releases/2/assets?name=weddy-v3.zip"])
+up, dl, _ = run("newest", gitea_assets=set(), max_mb="-1", size=50 * 1024 ** 3)
+check("assets_max_mb = -1: a 50 GB file is uploaded", up == ["/releases/2/assets?name=weddy-v3.zip"])
+up, dl, _ = run("newest", gitea_assets=set(), max_mb="0", size=10)
+check("negative: assets_max_mb = 0 uploads no file at all", up == [])
+up, dl, _ = run("newest", gitea_assets=set(), max_mb="", size=50 * 1024 ** 3)
+check("an empty assets_max_mb is no limit, as -1", len(up) == 1)
 
 # The menu: add (all) and wekan/wekan, refuse a duplicate and a bad name, remove one.
 answers = iter(["a", "(ALL)", "a", "https://github.com/wekan/wekan.git", "a", "Wekan/Wekan", "a", "bad name!",
@@ -162,15 +166,18 @@ check("release_assets_keep's default is newest", g.CFG.get("options", "release_a
 
 # Release files of any size by default: assets_max_mb is 0. A file with the old
 # default 2048 gets 0, once; 2048 chosen after that stays.
-check("assets_max_mb's default is 0, no limit", g.CFG.get("options", "assets_max_mb") == "0")
-for content, want in (("[options]\nassets_max_mb = 2048\n", "0"),
+check("assets_max_mb's default is -1, no limit", g.CFG.get("options", "assets_max_mb") == "-1")
+for content, want in (("[options]\nassets_max_mb = 2048\n", "-1"),
+                      ("[options]\nassets_max_mb = 0\n[migrations]\nassets_max_mb_unlimited = done\n", "-1"),
                       ("[options]\nassets_max_mb = 500\n", "500"),
-                      ("[options]\nassets_max_mb = 2048\n[migrations]\nassets_max_mb_unlimited = done\n", "2048")):
+                      ("[options]\nassets_max_mb = 0\n[migrations]\nassets_max_mb_no_limit = done\n", "0"),
+                      ("[options]\nassets_max_mb = 2048\n[migrations]\nassets_max_mb_no_limit = done\n", "2048")):
     with open(ini, "w") as f:
         f.write(content)
     g.CFG = configparser.ConfigParser(interpolation=None)
     g.load_config()
-    check(f"assets_max_mb {content.split()[3]}" + (" after the migration" if "done" in content else "") + f" becomes {want}",
+    check(f"assets_max_mb {content.split()[3]}" + (" after the migration" if "no_limit = done" in content else
+                                                   " from 0-is-no-limit" if "done" in content else "") + f" becomes {want}",
           g.CFG.get("options", "assets_max_mb") == want)
 
 print()
