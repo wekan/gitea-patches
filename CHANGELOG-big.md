@@ -188,7 +188,19 @@ the upload test fails without the fix.
 `assets_max_mb` is `0`, no limit, by default in github-to-gitea (it was 2048)
 and in gitea-to-gitlab and gitea-to-sourceforge (5000). A settings file with
 the old default gets `0` once, recorded under `[migrations]`, so a limit chosen
-after that stays.
+after that stays. No limit became `-1` in the next entry.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/{h}">Release file size limits read as Gitea's: -1 is no limit, 0 is no file</a>. Thanks to xet7.</summary>
+
+`assets_max_mb` reads as Gitea's `FILE_MAX_SIZE`: `-1`, the default, is no
+limit, `0` is a largest size of 0 so no file is copied, and a number is the
+largest size in MB. A settings file with `0` or an old default gets `-1` once,
+and the menus refuse other values. The Gitea patch's upload form gave Dropzone
+`maxFilesize` 0 for `FILE_MAX_SIZE = 0`, which Dropzone takes as no limit; it
+now gives `maxFiles` 0, and the upload test checks 0 too.
 
 </details>
 
