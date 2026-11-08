@@ -10,8 +10,8 @@ and pull requests with their comments, and releases with their files.
   ./gitea-to-sourceforge.py --check-missing  read-only: what is not mirrored yet
 
 Settings are in gitea-to-sourceforge.ini next to this file (mode 600, holds the token),
-the progress in gitea-to-sourceforge-state.json, and every run's log beside this file as
-gitea-to-sourceforge_YYYY-MM-DD_HH-MM-SS-log.txt.
+the progress in gitea-to-sourceforge-state.json, and every run's log in WeKan's
+.tools/log/mirror/gitea-to-sourceforge/YYYY-MM-DD_HH-MM-SS.txt.
 
 SOURCEFORGE - the same layout as WeKan's releases/mirror.sh, so both find each other's work
   - A Gitea owner's repositories go to ONE SourceForge project: the project from the

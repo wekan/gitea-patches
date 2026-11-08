@@ -91,19 +91,37 @@ def normalize(text):
 
 # --- logging, like WeKan's releases/mirror.sh: everything also goes to a run log ----------
 
+def mirror_log_dir():
+    """<WeKan>/.tools/log/mirror: the WeKan checkout is at a fixed place on each operating
+    system - ~/repos/wekan on Linux, ~/Documents/repos/wekan on macOS and
+    Downloads/repos/wekan under the user's profile on Windows. MIRROR_LOG_DIR overrides it."""
+    if os.environ.get("MIRROR_LOG_DIR"):
+        return os.environ["MIRROR_LOG_DIR"]
+    home = os.path.expanduser("~")
+    if sys.platform.startswith("win"):
+        wekan = os.path.join(os.environ.get("USERPROFILE", home), "Downloads", "repos", "wekan")
+    elif sys.platform == "darwin":
+        wekan = os.path.join(home, "Documents", "repos", "wekan")
+    else:
+        wekan = os.path.join(home, "repos", "wekan")
+    return os.path.join(wekan, ".tools", "log", "mirror")
+
+
 def start_screen_log(here, name):
     """Everything this run shows on the screen - its own lines, its prompts and the
     output of the git and other programs it runs - also goes to
-    <here>/<name>_YYYY-MM-DD_HH-MM-SS-log.txt, beside the script. Copied at the file
-    descriptors, so a child process's messages are in it too, and flushed to the file
-    before the program ends."""
+    <WeKan>/.tools/log/mirror/<name>/YYYY-MM-DD_HH-MM-SS.txt (mirror_log_dir()). Copied
+    at the file descriptors, so a child process's messages are in it too, and flushed
+    to the file before the program ends."""
     import atexit
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    path = os.path.join(here, f"{name}_{stamp}-log.txt")
+    d = os.path.join(mirror_log_dir(), name)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{stamp}.txt")
     n = 0
     while os.path.exists(path):
         n += 1
-        path = os.path.join(here, f"{name}_{stamp}-{n}-log.txt")
+        path = os.path.join(d, f"{stamp}-{n}.txt")
     out = open(path, "ab", buffering=0)
     lock = threading.Lock()
     saved, threads = [], []
