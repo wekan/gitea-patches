@@ -133,8 +133,12 @@ head commit f4f4c7f2cb is missing from the Gitea repository"). That one commit
 is now fetched from GitHub's `refs/pull/<N>/head` and pushed to Gitea as branch
 `github-pr/<N>` - the branch the PR is made from anyway - after checking it is
 the commit GitHub's API names; nothing else is pushed, and the tokens never
-appear on a git command line. `tests/githubToGiteaPush.test.py` runs it against
-local repositories standing in for GitHub and Gitea.
+appear on a git command line. A commit Gitea does not have is
+[pushed at once](https://github.com/wekan/gitea-patches/commit/9d3723a9f9c35532f6762f7fe569f71bfb1dfbc9),
+without first asking Gitea for a branch of it - which only wrote a 500 to its
+log - and Gitea's "Create a new pull request" push messages are not shown.
+`tests/githubToGiteaPush.test.py` runs it against local repositories standing
+in for GitHub and Gitea.
 
 </details>
 
