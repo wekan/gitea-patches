@@ -138,6 +138,17 @@ local repositories standing in for GitHub and Gitea.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/90db9ec3161373013c3dfee9dedb27700f248dbe">Every mirror script writes what the screen shows to a log beside itself</a>. Thanks to xet7.</summary>
+
+`<script>_YYYY-MM-DD_HH-MM-SS-log.txt` in the script's own directory: its lines,
+the menu's prompts and the messages of git and the other programs it runs, in
+the screen's order and flushed before the program ends. `.gitignore` keeps
+`*log.txt` out of commits; `tests/screenLog.test.py` checks all three
+implementations.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
