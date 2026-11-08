@@ -160,6 +160,19 @@ for content, want in (("[options]\nrelease_assets = none\n", "github"),
           g.CFG.get("options", "release_assets") == want)
 check("release_assets_keep's default is newest", g.CFG.get("options", "release_assets_keep") in ("newest",))
 
+# Release files of any size by default: assets_max_mb is 0. A file with the old
+# default 2048 gets 0, once; 2048 chosen after that stays.
+check("assets_max_mb's default is 0, no limit", g.CFG.get("options", "assets_max_mb") == "0")
+for content, want in (("[options]\nassets_max_mb = 2048\n", "0"),
+                      ("[options]\nassets_max_mb = 500\n", "500"),
+                      ("[options]\nassets_max_mb = 2048\n[migrations]\nassets_max_mb_unlimited = done\n", "2048")):
+    with open(ini, "w") as f:
+        f.write(content)
+    g.CFG = configparser.ConfigParser(interpolation=None)
+    g.load_config()
+    check(f"assets_max_mb {content.split()[3]}" + (" after the migration" if "done" in content else "") + f" becomes {want}",
+          g.CFG.get("options", "assets_max_mb") == want)
+
 print()
 print(f"{failures} failure(s)")
 sys.exit(1 if failures else 0)

@@ -603,6 +603,21 @@ check("without MIRROR_TMP_DIR, files go to WeKan's .tools/tmp/<script>",
       gm.mirror_tmp_dir("gitea-to-gitlab").endswith(os.path.join(".tools", "tmp", "gitea-to-gitlab")))
 os.environ["MIRROR_TMP_DIR"] = os.path.join(TMP, "mirror-tmp")
 
+# Release files of any size by default; the old default 5000 becomes 0, once.
+check("gitea-to-*: assets_max_mb's default is 0, no limit", e3.cfg.get("assets_max_mb") == "0")
+for content, want in (("[options]\nassets_max_mb = 5000\n", "0"), ("[options]\nassets_max_mb = 300\n", "300"),
+                      ("[options]\nassets_max_mb = 5000\n[migrations]\nassets_max_mb_unlimited = done\n", "5000")):
+    d = os.path.join(TMP, "ini-" + str(abs(hash(content))))
+    os.makedirs(d)
+    m = gm.Engine(gl_mod.GitLab(), d)
+    with open(m.ini, "w") as f:
+        f.write(content)
+    m.cfg.load()
+    check(f"gitea-to-*: {content.split(chr(10))[1]}" + (" after the migration" if "done" in content else "") + f" -> {want}",
+          m.cfg.get("assets_max_mb") == want)
+m.cfg.load()
+check("gitea-to-*: the migration is saved, so it runs once", "assets_max_mb_unlimited = done" in open(m.ini).read())
+
 print(f"\n{failures} failure(s)")
 subprocess.run(["rm", "-rf", TMP])
 sys.exit(1 if failures else 0)

@@ -70,8 +70,10 @@ most one release file is on the disk at a time.
 
 **Release files of any size into Gitea.** Two limits apply, and both can be lifted:
 
-- github-to-gitea's setting `assets_max_mb` (default 2048): a larger file is skipped.
-  `0` is no limit.
+- The scripts' setting `assets_max_mb`: a larger file is skipped. The default is `0`,
+  no limit, in every script (it was 2048 in github-to-gitea and 5000 in the others; a
+  settings file with that old default gets `0` once, and a value chosen after that
+  stays).
 - Gitea's own, in its `app.ini` (then restart Gitea). The release files' limit is
   `[repository.release] FILE_MAX_SIZE`, in MB, default 2048 - not `[attachment]
   MAX_SIZE`, which is the limit of files attached to issues and comments. `-1` is no

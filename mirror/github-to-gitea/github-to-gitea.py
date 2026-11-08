@@ -104,7 +104,7 @@ SETTINGS = [
     ("options", "release_assets", "github", "release files: github (download from GitHub) | local (assets_dir) | none"),
     ("options", "release_assets_keep", "newest", "releases that keep their files: newest | all | N (the N newest); the files of older releases are deleted from Gitea"),
     ("options", "assets_dir", "", "directory <tag>/<files> (release_assets = local); {owner} {name} allowed"),
-    ("options", "assets_max_mb", "2048", "largest release file to upload, in MB; 0 = no limit (Gitea: [repository.release] FILE_MAX_SIZE)"),
+    ("options", "assets_max_mb", "0", "largest release file to upload, in MB; 0 = no limit (Gitea: [repository.release] FILE_MAX_SIZE)"),
     ("options", "bare_repo", "~/gitea/data/gitea-repositories/{owner}/{name}.git",
      "Gitea's bare repositories on this machine ({owner} {name}); git fetch only when found"),
     ("options", "actions_branch", "gitea-actions", "branch the converted workflows are written to"),
@@ -373,6 +373,16 @@ def load_config():
         if not CFG.has_option(s, k):
             CFG.set(s, k, d)
             added = True
+    # assets_max_mb was 2048 by default, Gitea's default release file limit; now it is
+    # 0, no limit. A file written with the old default gets the new one, once (the
+    # [migrations] line), so 2048 chosen again afterwards stays.
+    if not CFG.has_option("migrations", "assets_max_mb_unlimited"):
+        if CFG.get("options", "assets_max_mb", fallback="").strip() == "2048":
+            CFG.set("options", "assets_max_mb", "0")
+        if not CFG.has_section("migrations"):
+            CFG.add_section("migrations")
+        CFG.set("migrations", "assets_max_mb_unlimited", "done")
+        added = True
     if CFG.get("options", "steps", fallback="").strip() == OLD_DEFAULT_STEPS:
         CFG.set("options", "steps", ", ".join(STEPS))
         added = True
