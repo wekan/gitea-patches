@@ -343,6 +343,23 @@ sftp: the API has no file releases. `tests/mirror.test.py` checks each.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/75ff479e939406d50acff9f6f4e8336c35b7585d">gitea-to-sourceforge signs in with an OAuth2 application's Client ID and Client Secret</a>. Thanks to xet7.</summary>
+
+SourceForge's button that creates a bearer token did not work, so the setting
+`token` is replaced by `client_id`, `client_secret` and `redirect_uri`
+(`https://localhost/` by default; SourceForge takes only `https://`). Menu item
+10 signs in with the authorization code flow and PKCE: open the address,
+authorize, and paste the address the browser went to. The access and refresh
+tokens are saved in `[sourceforge_oauth2]`, and the access token is renewed with
+the refresh token when it expires or SourceForge answers 401, so cron runs need
+no browser. OAuth2 access tokens are not hexadecimal, so the hex check of the
+previous entry is replaced with refusing only a token that could end the header.
+The answer's state is checked, and an earlier hand-made token moves to
+`[sourceforge_oauth2]`.
+
+</details>
+
 and has the following developer-facing changes:
 
 **Changelog** - two files, as in WeKan.
