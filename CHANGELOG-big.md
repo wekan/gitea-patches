@@ -19,8 +19,9 @@ the source as `gitea-patches-source-with-history.zip` and
 repository's changes applied as **git commits**, and released with its source as
 **two zips** - with and without git history - and binaries for **every platform
 upstream releases**, built from the zip without history. The web UI is
-**completely in Finnish**, and the local Gitea is **mirrored on to GitLab and
-SourceForge**.
+**completely in Finnish**, the local Gitea is **mirrored on to GitLab and
+SourceForge**, and **long migrations** no longer break off on Gitea's SQLite and
+clone time limit.
 
 This release adds the following new features:
 
@@ -193,7 +194,7 @@ after that stays. No limit became `-1` in the next entry.
 </details>
 
 <details>
-<summary><a href="https://github.com/wekan/gitea-patches/commit/{h}">Release file size limits read as Gitea's: -1 is no limit, 0 is no file</a>. Thanks to xet7.</summary>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/e9ad778ba62331f40edcb76037440f5cf2f3a307">Release file size limits read as Gitea's: -1 is no limit, 0 is no file</a>. Thanks to xet7.</summary>
 
 `assets_max_mb` reads as Gitea's `FILE_MAX_SIZE`: `-1`, the default, is no
 limit, `0` is a largest size of 0 so no file is copied, and a number is the
@@ -381,6 +382,34 @@ not sent, so SourceForge uses the application's first registered redirect URL
 in both the authorization and the code exchange; a settings file with the old
 default gets the empty value once. Pasting nothing, or the sign-in address
 itself, is refused with what to paste instead.
+
+</details>
+
+**Long migrations** - Gitea's SQLite and clone time limit, which broke them off.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/49cc43fcd08c7ba037ef148c47003b0743b5ca73">SQLite in WAL mode and a day for a migration's clone, by default; such failures are not retried</a>. Thanks to xet7.</summary>
+
+github-to-gitea's migration of godotengine/godot broke off at 42,535 issues,
+after two and a half hours, with `database is locked` (`SQLITE_BUSY`), and
+storytold/harfbuzz the same way: in SQLite's default journal mode every reader
+blocks the writer, and Gitea's nightly repository health check and its mirror
+and Actions queries ran beside the import. LibreOffice/translations and
+translations-weblate broke off with `clone timed out`. A migration cannot be
+resumed, and each was started again to fail the same way.
+
+`dist/all/sqlite-wal-by-default.patch` makes `[database] SQLITE_JOURNAL_MODE`
+`WAL` when it is not set, so readers and the writer work at once; a database
+opened with Gitea's own connection string was checked to be in WAL mode.
+`dist/all/migrate-timeout-a-day.patch` makes `[git.timeout] MIGRATE` 86400 s
+when it is not set (it was 600). A configured value is kept by both, and each
+has a Go test that fails without it. github-to-gitea stops a repository whose
+migration failed in either way with the `app.ini` settings that fix it, as it
+already did for git fsck, instead of a second attempt of hours; any other
+failure is still tried once more. Removing the leftover repository no longer
+says that nothing is lost: what it imported is discarded.
+`tests/githubToGiteaMigrateErrors.test.py` covers it, and 6 of its checks fail
+with the old script.
 
 </details>
 
