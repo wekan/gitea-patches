@@ -1,0 +1,110 @@
+From 74ee5bd10d3890c09631abd5d51fa90debd15ec3 Mon Sep 17 00:00:00 2001
+From: Lauri Ojansivu <x@xet7.org>
+Date: Sat, 14 Nov 2026 00:13:59 +0200
+Subject: [PATCH] SQLite in WAL mode by default.
+
+[database] SQLITE_JOURNAL_MODE is WAL when it is not set (it was SQLite's
+own default, DELETE). In DELETE mode every reader blocks the writer, so
+a long import and Gitea's background tasks wait for each other until one
+of them gives up after SQLITE_TIMEOUT with "database is locked"
+(SQLITE_BUSY): a GitHub migration of godotengine/godot broke off at
+42,535 issues when the nightly repository health check and the mirror
+and Actions queries ran beside it, and a migration cannot be resumed.
+In WAL mode readers and the one writer work at once.
+
+A configured mode is kept; DELETE is still there for a database on a
+filesystem WAL cannot work on, such as a network share.
+
+Test: TestLoadDBSettingSQLiteJournalMode (the default, and a configured
+mode).
+---
+ custom/conf/app.example.ini      |  2 +-
+ modules/setting/database.go      |  9 +++++++-
+ modules/setting/database_test.go | 35 ++++++++++++++++++++++++++++++++
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+ create mode 100644 modules/setting/database_test.go
+
+diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
+index 1e9614198c..4a8df18835 100644
+--- a/custom/conf/app.example.ini
++++ b/custom/conf/app.example.ini
+@@ -387,7 +387,7 @@ USER = root
+ ;DB_TYPE = sqlite3
+ ;PATH= ; defaults to data/gitea.db
+ ;SQLITE_TIMEOUT = ; Query timeout in milliseconds, defaults to: 20000
+-;SQLITE_JOURNAL_MODE = ; defaults to sqlite database default (often DELETE), can be used to enable WAL mode. https://www.sqlite.org/pragma.html#pragma_journal_mode
++;SQLITE_JOURNAL_MODE = ; defaults to WAL, in which readers do not block the writer. DELETE is SQLite's own default; use it where WAL cannot work, e.g. a database on a network filesystem. https://www.sqlite.org/pragma.html#pragma_journal_mode
+ ;;
+ ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;;
+diff --git a/modules/setting/database.go b/modules/setting/database.go
+index 639f54f734..55f1cd8628 100644
+--- a/modules/setting/database.go
++++ b/modules/setting/database.go
+@@ -10,6 +10,9 @@ import (
+ 
+ const DefaultSQLiteBusyTimeout = 20 * 1000
+ 
++// DefaultSQLiteJournalMode is the journal mode of an SQLite database that sets none.
++const DefaultSQLiteJournalMode = "WAL"
++
+ var (
+ 	// SupportedDatabaseTypes includes all XORM supported databases type, sqlite3 maybe added by the tag-controlled drivers
+ 	SupportedDatabaseTypes = []string{"mysql", "postgres", "mssql"}
+@@ -72,7 +75,11 @@ func loadDBSetting(rootCfg ConfigProvider) {
+ 	if Database.SQLiteBusyTimeout < 5000 {
+ 		Database.SQLiteBusyTimeout = DefaultSQLiteBusyTimeout
+ 	}
+-	Database.SQLiteJournalMode = sec.Key("SQLITE_JOURNAL_MODE").MustString("")
++	// WAL lets readers and the one writer work at once. In SQLite's own default
++	// (DELETE) every reader blocks the writer, so a long import - a migration of
++	// tens of thousands of issues - and Gitea's own background tasks wait for each
++	// other until one gives up with "database is locked" (SQLITE_BUSY).
++	Database.SQLiteJournalMode = sec.Key("SQLITE_JOURNAL_MODE").MustString(DefaultSQLiteJournalMode)
+ 
+ 	Database.MaxIdleConns = sec.Key("MAX_IDLE_CONNS").MustInt(2)
+ 	if Database.Type.IsMySQL() {
+diff --git a/modules/setting/database_test.go b/modules/setting/database_test.go
+new file mode 100644
+index 0000000000..a15193ef13
+--- /dev/null
++++ b/modules/setting/database_test.go
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package setting
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestLoadDBSettingSQLiteJournalMode(t *testing.T) {
++	oldDatabase := Database
++	defer func() { Database = oldDatabase }()
++
++	// Nothing set: WAL, so that readers do not block the writer.
++	cfg, err := NewConfigProviderFromData(`
++[database]
++DB_TYPE = sqlite3
++`)
++	require.NoError(t, err)
++	loadDBSetting(cfg)
++	assert.Equal(t, "WAL", Database.SQLiteJournalMode)
++
++	// A configured mode is kept.
++	cfg, err = NewConfigProviderFromData(`
++[database]
++DB_TYPE = sqlite3
++SQLITE_JOURNAL_MODE = DELETE
++`)
++	require.NoError(t, err)
++	loadDBSetting(cfg)
++	assert.Equal(t, "DELETE", Database.SQLiteJournalMode)
++}
+-- 
+2.56.0
+

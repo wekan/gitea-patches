@@ -603,6 +603,26 @@ def migrate_into(name):
                  f"to accept it in Gitea too, add to Gitea's app.ini and restart Gitea:\n"
                  f"    [git.config]\n    fetch.fsck.{fsck.group(1)} = ignore\n"
                  f"  and run this again. The original error: {reason}")
+        if "clone timed out" in reason:
+            # Gitea stops the clone after [git.timeout] MIGRATE seconds (600 by default);
+            # a large history needs longer every time, so another attempt ends the same way.
+            fail("Gitea stopped cloning the history after its migration time limit "
+                 "([git.timeout] MIGRATE, 600 s by default); this repository needs longer. "
+                 "Add to Gitea's app.ini:\n"
+                 "    [git.timeout]\n    MIGRATE = 86400\n"
+                 f"  then restart Gitea and run this again. The original error: {reason}")
+        if re.search(r"database is locked|SQLITE_BUSY", reason):
+            # Gitea's SQLite gave up waiting for a write lock (SQLITE_TIMEOUT, 20 s by
+            # default) while another task held it - Gitea's own repository health check
+            # (git fsck of every repository, @midnight) or a mirror sync. Another attempt
+            # repeats hours of import into the same contention: change Gitea first.
+            fail("Gitea's SQLite database was locked for longer than Gitea waits (SQLITE_BUSY), "
+                 "so the migration broke off; a migration cannot be resumed. Let readers and "
+                 "writers work at once and wait longer - add to Gitea's app.ini:\n"
+                 "    [database]\n    SQLITE_JOURNAL_MODE = WAL\n    SQLITE_TIMEOUT = 300000\n"
+                 "  and keep the nightly git fsck of every repository out of long imports:\n"
+                 "    [cron.repo_health_check]\n    ENABLED = false\n"
+                 f"  then restart Gitea and run this again. The original error: {reason}")
         if attempt == 1:
             log("  Trying the migration once more in 60 s ({n}/2)...".format(n=2))
             time.sleep(60)
@@ -621,7 +641,9 @@ def leftover(name):
 
 
 def remove_leftover(name):
-    log("  {r} is empty while GitHub has content: a failed migration left it. Removing it (nothing is lost).".format(r=f"{OWNER}/{name}"))
+    log("  {r} is empty while GitHub has content: a failed migration left it. Removing it - a migration "
+        "cannot be resumed, so what it imported is discarded and the next one starts over; "
+        "GitHub still has everything.".format(r=f"{OWNER}/{name}"))
     status, data = gitea("DELETE", f"/repos/{OWNER}/{name}")
     if status not in (200, 204) and not DRY:
         fail("Removing {r} failed: {s} {d}".format(r=f"{OWNER}/{name}", s=status, d=data))

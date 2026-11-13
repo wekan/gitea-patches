@@ -1,0 +1,84 @@
+From 55b9653206a613ed416790d46ec8e95b7cedb88c Mon Sep 17 00:00:00 2001
+From: Lauri Ojansivu <x@xet7.org>
+Date: Sat, 14 Nov 2026 00:15:16 +0200
+Subject: [PATCH] A migration's clone may take a day by default.
+
+[git.timeout] MIGRATE is 86400 seconds when it is not set (it was 600).
+A migration clones the whole history before anything else, and ten
+minutes is not enough for a large one: LibreOffice/translations and
+LibreOffice/translations-weblate broke off with "clone timed out", and a
+clone that times out has to start over. The timeout covers only that
+clone; mirror updates keep their own [git.timeout] MIRROR.
+
+A configured timeout is kept.
+
+Test: TestGitTimeoutMigrate (the default, and a configured timeout).
+---
+ custom/conf/app.example.ini |  3 ++-
+ modules/setting/git.go      |  5 ++++-
+ modules/setting/git_test.go | 22 ++++++++++++++++++++++
+ 3 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
+index 4a8df18835..dd6f19a245 100644
+--- a/custom/conf/app.example.ini
++++ b/custom/conf/app.example.ini
+@@ -795,7 +795,8 @@ LEVEL = Info
+ ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;; Git Operation timeout in seconds
+ ;[git.timeout]
+-;MIGRATE = 600
++;; A migration clones the whole history first; a large one takes hours.
++;MIGRATE = 86400
+ ;MIRROR = 300
+ ;GC = 60
+ 
+diff --git a/modules/setting/git.go b/modules/setting/git.go
+index 014230c538..34b75155c1 100644
+--- a/modules/setting/git.go
++++ b/modules/setting/git.go
+@@ -55,7 +55,10 @@ var Git = struct {
+ 		Mirror  int
+ 		GC      int `ini:"GC"`
+ 	}{
+-		Migrate: 600,
++		// A migration clones the whole history first: ten minutes is not enough for a
++		// large one (LibreOffice's translations), and a clone that times out has to
++		// start over. A day.
++		Migrate: 24 * 60 * 60,
+ 		Mirror:  300,
+ 		GC:      60,
+ 	},
+diff --git a/modules/setting/git_test.go b/modules/setting/git_test.go
+index 4a1b3ffa76..ecea4fe23f 100644
+--- a/modules/setting/git_test.go
++++ b/modules/setting/git_test.go
+@@ -63,3 +63,25 @@ EXPIRATION = 123
+ 	assert.Equal(t, "false", GitConfig.GetOption("core.logAllRefUpdates"))
+ 	assert.Equal(t, "123.days", GitConfig.GetOption("gc.reflogExpire"))
+ }
++
++func TestGitTimeoutMigrate(t *testing.T) {
++	oldGit := Git
++	defer func() { Git = oldGit }()
++
++	// Nothing set: a day, for a migration's clone of a large history.
++	cfg, err := NewConfigProviderFromData(``)
++	assert.NoError(t, err)
++	loadGitFrom(cfg)
++	assert.Equal(t, 86400, Git.Timeout.Migrate)
++	assert.Equal(t, 300, Git.Timeout.Mirror)
++
++	// A configured timeout is kept.
++	Git = oldGit
++	cfg, err = NewConfigProviderFromData(`
++[git.timeout]
++MIGRATE = 600
++`)
++	assert.NoError(t, err)
++	loadGitFrom(cfg)
++	assert.Equal(t, 600, Git.Timeout.Migrate)
++}
+-- 
+2.56.0
+

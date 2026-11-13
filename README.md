@@ -30,8 +30,15 @@ the Finnish translation and its release workflows - both are here now.
   ([dist/all/release-files-any-size.md](dist/all/release-files-any-size.md)):
   `[repository.release] FILE_MAX_SIZE` is `-1`, no limit, by default (`0` allows no
   file), and `-1` works in the API's streamed uploads and in the upload form, where
-  upstream refuses every file with it. Code patches are in `dist/all/`; see
-  [the patch format](docs/Design/Patch-format.md).
+  upstream refuses every file with it.
+- **SQLite in WAL mode** ([dist/all/sqlite-wal-by-default.md](dist/all/sqlite-wal-by-default.md)):
+  `[database] SQLITE_JOURNAL_MODE` is `WAL` by default, so readers no longer block
+  the writer and a long migration does not break off with `database is locked`.
+- **A migration's clone may take a day**
+  ([dist/all/migrate-timeout-a-day.md](dist/all/migrate-timeout-a-day.md)):
+  `[git.timeout] MIGRATE` is 86400 s by default (it was 600), for large histories.
+
+Code patches are in `dist/all/`; see [the patch format](docs/Design/Patch-format.md).
 
 ## Making a release
 
