@@ -203,6 +203,18 @@ def github_wait(headers, text, waits):
     return 0
 
 
+def is_github_api(url):
+    """True when url is GitHub's REST/GraphQL API itself: its host, parsed, is exactly
+    api.github.com. A substring test also matched https://api.github.com.example.org/
+    and https://example.org/?api.github.com, and would have waited out that server's
+    "rate limit" as if it were GitHub's."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme == "https" and (parts.hostname or "").lower() == "api.github.com"
+
+
 def http(method, url, token, body=None, stream=None, timeout=600, retry=True):
     headers = {"Accept": "application/json", "User-Agent": "github-to-gitea"}
     if token:
@@ -215,7 +227,7 @@ def http(method, url, token, body=None, stream=None, timeout=600, retry=True):
         data = stream
         headers["Content-Type"] = stream.ctype
         headers["Content-Length"] = str(stream.length)
-    github = "api.github.com" in url
+    github = is_github_api(url)
     attempt = waits = 0
     while True:
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
