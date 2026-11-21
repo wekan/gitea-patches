@@ -385,7 +385,8 @@ itself, is refused with what to paste instead.
 
 </details>
 
-**Long migrations** - Gitea's SQLite and clone time limit, which broke them off.
+**Long migrations** - Gitea's SQLite and clone time limit, which broke them off,
+and what a long one is doing.
 
 <details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/49cc43fcd08c7ba037ef148c47003b0743b5ca73">SQLite in WAL mode and a day for a migration's clone, by default; such failures are not retried</a>. Thanks to xet7.</summary>
@@ -410,6 +411,20 @@ failure is still tried once more. Removing the leftover repository no longer
 says that nothing is lost: what it imported is discarded.
 `tests/githubToGiteaMigrateErrors.test.py` covers it, and 6 of its checks fail
 with the old script.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/8976ac7cbb24aaa7567a1a43bc073a2ac62f15b1">A migration that downloads Git LFS files says so, instead of only "issues 0, PRs 0"</a>. Thanks to xet7.</summary>
+
+Gitea downloads every Git LFS file of a repository before it reads a single
+issue, so microsoft/AEC-Challenge - its `.wav` datasets are in LFS - showed
+`issues 0, PRs 0` every five minutes for hours, as if the migration were stuck.
+github-to-gitea reads the repository's `.gitattributes` first: when it has LFS
+patterns and `lfs` is on, it names them and says that `lfs = no` leaves the
+files out, and while nothing has arrived yet each progress line says it is
+still cloning, and for how many minutes. `tests/githubToGiteaLfs.test.py`
+covers it, a repository without LFS and `lfs = no` included.
 
 </details>
 
