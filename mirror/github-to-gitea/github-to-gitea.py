@@ -538,6 +538,17 @@ def numbering_matches(name):
     return True
 
 
+def uses_lfs(info):
+    """The LFS patterns of the GitHub repository's .gitattributes ("*.wav"), or ""."""
+    try:
+        d = gh(f"repos/{GITHUB_REPO}/contents/.gitattributes", {"ref": info.get("default_branch") or "HEAD"})
+        text = base64.b64decode(d.get("content") or "").decode("utf-8", "replace") if isinstance(d, dict) else ""
+    except Exception:
+        return ""
+    pats = [line.split()[0] for line in text.splitlines() if "filter=lfs" in line and line.split()]
+    return ", ".join(pats[:5]) + (", ..." if len(pats) > 5 else "")
+
+
 def migrate_into(name):
     log(f"Gitea's GitHub migration: github.com/{GITHUB_REPO} -> {OWNER}/{name}")
     log("  Imports the git history, labels, milestones, issues, PRs, comments and reviews")
@@ -561,6 +572,15 @@ def migrate_into(name):
         if s not in (200, 201) and not DRY:
             fail(f"creating the empty repository {OWNER}/{name} failed: {s} {d}")
         return True
+    # Gitea downloads every Git LFS file before it reads a single issue, so a repository
+    # whose data is in LFS (microsoft/AEC-Challenge: its .wav datasets) shows
+    # "issues 0, PRs 0" for hours. Say so up front, and say how to leave LFS out.
+    lfs = flag("lfs") and uses_lfs(info)
+    if lfs:
+        log(f"  Uses Git LFS ({lfs}). Gitea downloads every LFS file first - it can be hundreds of GB")
+        log("  and hours - and only then the issues and PRs. To leave LFS files out, set lfs = no")
+        log("  (Settings) and run this repository again.")
+    started = time.time()
     body = {"clone_addr": f"https://github.com/{GITHUB_REPO}.git", "service": "github",
             "auth_token": github_token(OWNER) or "", "repo_owner": OWNER, "repo_name": name,
             "mirror": False, "private": bool(info.get("private")),
@@ -586,7 +606,12 @@ def migrate_into(name):
         while th.is_alive():
             th.join(300)
             if th.is_alive():
-                log("  {t}: issues {i}, PRs {p}".format(t=time.strftime('%H:%M'), i=gt_total(repo, 'issues'), p=gt_total(repo, 'pulls')))
+                i, p = gt_total(repo, 'issues'), gt_total(repo, 'pulls')
+                # Nothing yet: Gitea is still cloning - the git history, and the LFS files.
+                doing = "" if i > 0 or p > 0 else (
+                    " - still cloning the git history{l}, {m} min so far".format(
+                        l=" and the LFS files" if lfs else "", m=int((time.time() - started) // 60)))
+                log("  {t}: issues {i}, PRs {p}{d}".format(t=time.strftime('%H:%M'), i=i, p=p, d=doing))
         status, data = result["r"]
         if status == 201:
             log("Migration done: issues {i}, PRs {p}".format(i=gt_total(repo, 'issues'), p=gt_total(repo, 'pulls')))

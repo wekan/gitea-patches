@@ -46,6 +46,7 @@ case "$command" in
     python3 -I tests/githubToGiteaFork.test.py
     python3 -I tests/githubToGiteaRunErrors.test.py
     python3 -I tests/githubToGiteaMigrateErrors.test.py
+    python3 -I tests/githubToGiteaLfs.test.py
     python3 -I tests/screenLog.test.py
     python3 -I tests/changelogShort.test.py ;;
   release-all)
