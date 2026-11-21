@@ -20,10 +20,28 @@ repository's changes applied as **git commits**, and released with its source as
 **two zips** - with and without git history - and binaries for **every platform
 upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
-SourceForge**, and **long migrations** no longer break off on Gitea's SQLite and
-clone time limit.
+SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
+clone time limit, and github-to-gitea recognises **GitHub's API by its parsed
+host**.
 
-This release adds the following new features:
+This release fixes the following SECURITY ISSUES found by GitHub CodeQL code scanning:
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/f4a53499f3e4ecb3b66c280166c51b20b4744c8d">github-to-gitea recognises GitHub's API by its parsed host, not by a substring of the URL</a>. Thanks to GitHub CodeQL and xet7.</summary>
+
+`http()` treated a URL as GitHub's API - and waited out GitHub's rate limits for
+it - when `"api.github.com" in url`, which also holds for
+`https://api.github.com.example.org/`, `https://example.org/?api.github.com` and
+`https://api.github.com@example.org/` (code scanning #1,
+`py/incomplete-url-substring-sanitization`). `is_github_api()` parses the URL
+with `urllib.parse` and requires `https` and the host `api.github.com` exactly.
+`tests/githubToGiteaApiHost.test.py` covers GitHub's own URLs and the
+look-alikes, and as a negative test that no script under `mirror/` tests a URL
+by a substring of it.
+
+</details>
+
+and adds the following new features:
 
 **Releases** - built from upstream plus patches, replacing the wekan/gitea fork.
 
