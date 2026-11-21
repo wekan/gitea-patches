@@ -286,7 +286,7 @@ the menu and the negative cases.
 
 and fixes the following bugs:
 
-**Mirroring** - github-to-gitea's errors in a run of 942 repositories.
+**Mirroring** - github-to-gitea's errors in runs of 942 and 11,761 repositories.
 
 <details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/60ba0a05ea6a1b54bf840a199fc6947fbbfae618">A non-UTF-8 workflow file is read, and one repository's fault no longer stops the run</a>. Thanks to xet7.</summary>
@@ -431,6 +431,24 @@ not sent, so SourceForge uses the application's first registered redirect URL
 in both the authorization and the code exchange; a settings file with the old
 default gets the empty value once. Pasting nothing, or the sign-in address
 itself, is refused with what to paste instead.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/dea6f5d9f3379ae79f718a752b4872177d90867f">PRs whose commits GitHub's refs do not bring, deleted base branches, and a dropped connection</a>. Thanks to xet7.</summary>
+
+A PR's head commit the repository's git fetch did not bring stopped it with
+"object does not exist": cloudflare/moq-rs #317 had no refs/pull/317/head,
+storytold/figcraft #2396's ref was a commit behind, and two storytold PRs were
+newer than the fetch. The commit is now fetched by its name, into Gitea's bare
+repository or the push cache, and the message no longer claims a push that was
+not tried. A PR into a base branch GitHub deleted (craft-libs #1185, wordcraft
+#6955) gets that branch made again at its base commit. "Remote end closed
+connection without response" during microsoft/AEC-Challenge's LFS files no
+longer removes a repository Gitea is still migrating, and a leftover is removed
+only when it is older than a day. Gitea's issue counter behind its issues
+(godotengine/godot #78432, "UNIQUE constraint failed") is named, with the SQL
+that sets it.
 
 </details>
 
