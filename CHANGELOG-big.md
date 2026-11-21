@@ -243,6 +243,17 @@ now gives `maxFiles` 0, and the upload test checks 0 too.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/f7402f10721edaa974b3f1f7bdb5223ced684388">The release file size patch applies to upstream main again</a>. Thanks to xet7.</summary>
+
+Upstream's attachment SHA-256 (go-gitea/gitea#39954) rewrote the imports of
+`services/attachment/attachment_test.go`, so the patch stopped applying and a
+release from upstream `main` stopped at it. Re-ported: only the test's imports
+changed. Every patch in `dist/` applies to upstream `main` again, and the
+packages they touch build, vet and pass their tests there.
+
+</details>
+
 **A release of many versions** - rustdesk's nightly style, newest version only.
 
 <details>
