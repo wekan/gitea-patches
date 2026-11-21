@@ -21,8 +21,8 @@ repository's changes applied as **git commits**, and released with its source as
 upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
 SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, and github-to-gitea recognises **GitHub's API by its parsed
-host**.
+clone time limit, github-to-gitea recognises **GitHub's API by its parsed
+host**, and Gitea carries the **security hardening** code scanning found.
 
 This release fixes the following SECURITY ISSUES found by GitHub CodeQL code scanning:
 
@@ -38,6 +38,26 @@ with `urllib.parse` and requires `https` and the host `api.github.com` exactly.
 `tests/githubToGiteaApiHost.test.py` covers GitHub's own URLs and the
 look-alikes, and as a negative test that no script under `mirror/` tests a URL
 by a substring of it.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/4ffa881dd9ab21d629713fbe05734a0cc798dd5c">Gitea is built with the hardening code scanning found worth making in it</a>. Thanks to GitHub CodeQL and xet7.</summary>
+
+`dist/all/security-hardening.patch` caps result slices at 100 whatever page
+size a request asks for (the container registry's `?n=` reserved gigabytes
+before reading a row), bounds `int64` totals and issue numbers on 32-bit
+platforms, redacts credentials from the access log, keeps session IDs, temp
+names and Git hook names inside their directories, binds the job summary
+upsert and the milestone keyword as SQL arguments, keeps an external
+renderer's request-derived variables out of the program it runs, and computes
+the fast hashes that are not password storage through the crypto registry.
+The alerts were raised on wekan/caddy-gitea-plugin, whose own patch carried
+this; it is Gitea's code, so it is here now. Re-ported onto upstream main,
+where the repository adopt feature is gone (go-gitea/gitea#40181). Tests
+include `TestNoPageSizeCapacity`, which fails on a page-size capacity anywhere
+in Gitea, and `TestTwoFactorEncryptionKeyUnchanged`, which reads a TOTP
+secret stored the old way.
 
 </details>
 
