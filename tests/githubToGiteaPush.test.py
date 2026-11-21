@@ -43,6 +43,8 @@ github = os.path.join(TMP, "github.git")
 git("clone", "-q", "--bare", work, github)
 git("update-ref", "refs/pull/8/head", head, cwd=github)
 git("update-ref", "-d", "refs/heads/feature", cwd=github)
+# GitHub serves a commit of the repository by name, not only its advertised refs.
+git("config", "uploadpack.allowReachableSHA1InWant", "true", cwd=github)
 # "Gitea": the same repository before the PR, without its commit.
 gitea = os.path.join(TMP, "gitea.git")
 git("clone", "-q", "--bare", "--no-local", "--single-branch", "-b", "main", work, gitea)
@@ -74,7 +76,7 @@ g.subprocess.run = recording_run
 
 check("the PR's head commit is not in Gitea before",
       subprocess.run(["git", "-C", gitea, "cat-file", "-e", head], capture_output=True).returncode != 0)
-check("push_pr_head reports the branch there", g.push_pr_head(8, head, "github-pr/8") is True)
+check("push_commit reports the branch there", g.push_commit(8, head, "github-pr/8", "refs/github-pull/8/head") is True)
 check("Gitea has the commit as branch github-pr/8", git("rev-parse", "refs/heads/github-pr/8", cwd=gitea) == head)
 refs = git("for-each-ref", "--format=%(refname)", cwd=gitea).split()
 check("negative: nothing else was pushed - only main and github-pr/8", sorted(refs) == ["refs/heads/github-pr/8", "refs/heads/main"])
@@ -83,10 +85,17 @@ check("the cache is under the script's tmp/", os.path.isdir(os.path.join(TMP, "t
 
 # Negative: GitHub's refs/pull/<N>/head is another commit than the API said - not pushed.
 check("negative: a head that is not the API's commit is not pushed",
-      g.push_pr_head(8, "0" * 40, "github-pr/9") is False and
+      g.push_commit(8, "0" * 40, "github-pr/9", "refs/github-pull/8/head") is False and
       subprocess.run(["git", "-C", gitea, "rev-parse", "--verify", "-q", "refs/heads/github-pr/9"], capture_output=True).returncode != 0)
-# Negative: a PR GitHub does not have fails, it does not crash the run.
-check("negative: a missing PR ref returns False", g.push_pr_head(99, head, "github-pr/99") is False)
+# cloudflare/moq-rs #317: GitHub had refs/pull/317/merge but no refs/pull/317/head.
+# The commit is still GitHub's, and is fetched by its name and pushed.
+check("a PR with no refs/pull/<N>/head: its commit is fetched by name and pushed",
+      g.push_commit(99, head, "github-pr/99", "refs/github-pull/99/head") is True and
+      git("rev-parse", "refs/heads/github-pr/99", cwd=gitea) == head)
+# Negative: a commit GitHub does not have at all fails; it does not crash the run.
+check("negative: a commit GitHub does not have returns False",
+      g.push_commit(98, "1" * 40, "github-pr/98", "refs/github-pull/98/head") is False and
+      subprocess.run(["git", "-C", gitea, "rev-parse", "--verify", "-q", "refs/heads/github-pr/98"], capture_output=True).returncode != 0)
 
 # create_pull: a commit Gitea does not have is pushed at once - no POST /branches,
 # which would only write a 500 to Gitea's log - and git's remote: lines are not shown.

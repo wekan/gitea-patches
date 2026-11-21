@@ -35,12 +35,16 @@ STEPS
             old -> <name>-old-YYYYMMDD (not deleted), new -> <name>.
   git       fetches GitHub's branches, tags and refs/pull/*/head into the bare repository
             (setting bare_repo) - a local git fetch, no push - so that the commits of new
-            pull requests are in Gitea. Without the bare repository on this machine, a new
-            pull request's head commit is fetched from GitHub into tmp/ beside the script
-            and pushed to Gitea as its branch github-pr/<N>, and nothing else is pushed.
+            pull requests are in Gitea. A head commit that fetch does not bring - GitHub
+            has no or an older refs/pull/<N>/head, or the PR is newer than the fetch - is
+            fetched by its name when the PR is made. Without the bare repository on this
+            machine, a new pull request's head commit is fetched from GitHub into tmp/
+            beside the script and pushed to Gitea as its branch github-pr/<N>, and nothing
+            else is pushed.
   issues    new numbers in order (a pull request as a real one, from branch
-            github-pr/<N>), and changes to existing ones: title, body, state, labels, new
-            comments. If a pull request cannot be made a real one, the repository stops
+            github-pr/<N>, into its base branch - made again at the PR's base commit when
+            GitHub deleted it), and changes to existing ones: title, body, state, labels,
+            new comments. If a pull request cannot be made a real one, the repository stops
             instead of making it an issue (the numbers would get out of step).
   releases  releases, with the tag on the right commit; files according to the
             setting release_assets (github / local / none). By default only the
@@ -629,6 +633,16 @@ def migrate_into(name):
             log("Migration done: issues {i}, PRs {p}".format(i=gt_total(repo, 'issues'), p=gt_total(repo, 'pulls')))
             return True
         reason = f"{status} {data.get('message') if isinstance(data, dict) else data}"
+        if status == 0 and repo_exists(name):
+            # No answer at all - "Remote end closed connection without response" after 70
+            # minutes of microsoft/AEC-Challenge's LFS files - and the repository exists, so
+            # Gitea started the migration, and it does not stop when the client goes away
+            # (routers/api/v1/repo/migrate.go runs it on a background context). Removing the
+            # repository or posting again would cut into a migration that is still running.
+            fail(f"The connection to Gitea closed before the migration answered ({reason}). Gitea goes on "
+                 f"migrating {repo} in the background, so it is kept and nothing is tried again now. "
+                 f"Do not stop Gitea until its log says the migration finished; then run this repository "
+                 f"again, which checks the numbers and continues.")
         log(f"Migration failed: {reason}")
         if repo_exists(name):
             remove_leftover(name)
@@ -677,6 +691,32 @@ def leftover(name):
         return False
 
 
+# An empty repository younger than this may be a migration Gitea is still running:
+# Gitea goes on with it when the client goes away, and the repository stays empty
+# for hours while Gitea stores the Git LFS files (microsoft/AEC-Challenge). Gitea's
+# API does not say whether a migration is running, failed or done, so only one
+# this old is taken for the leftover of a failed migration.
+LEFTOVER_MIN_AGE = 24 * 3600
+
+
+def clear_leftover(name):
+    """Remove the leftover of a failed migration - unless it is young enough to be a
+    migration still running, which stops this repository instead of deleting it."""
+    status, data = gitea("GET", f"/repos/{OWNER}/{name}")
+    created = (data or {}).get("created_at") if status == 200 else None
+    try:
+        age = time.time() - datetime.datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        age = None
+    if age is not None and age < LEFTOVER_MIN_AGE:
+        fail(f"{OWNER}/{name} is empty while GitHub has content, and was created {int(age // 60)} min ago: "
+             f"Gitea may still be migrating it (it goes on when the client goes away, and the repository "
+             f"stays empty while it stores the Git LFS files), so it is not removed. Let Gitea run until "
+             f"its log says the migration finished or failed. If it failed, delete {OWNER}/{name} in "
+             f"Gitea, or run this again after {LEFTOVER_MIN_AGE // 3600} h, when an empty one is removed.")
+    remove_leftover(name)
+
+
 def remove_leftover(name):
     log("  {r} is empty while GitHub has content: a failed migration left it. Removing it - a migration "
         "cannot be resumed, so what it imported is discarded and the next one starts over; "
@@ -695,7 +735,7 @@ def rename(old, new):
 
 def ensure_migrated(state, replace_broken):
     if repo_exists(NAME) and leftover(NAME):
-        remove_leftover(NAME)
+        clear_leftover(NAME)
         state.pop("migrated", None)
     if not repo_exists(NAME):
         state["since"] = now_iso()
@@ -713,7 +753,7 @@ def ensure_migrated(state, replace_broken):
                  f"as {NAME}-github, and the old one is kept as {NAME}-old-<date>.")
     tmp = f"{NAME}-github"
     if repo_exists(tmp) and leftover(tmp):
-        remove_leftover(tmp)
+        clear_leftover(tmp)
     if repo_exists(tmp):
         log(f"{OWNER}/{tmp} already exists (an earlier migration); using it.")
     else:
@@ -945,26 +985,44 @@ def gitea_git_url():
     return f"{root}/{OWNER}/{NAME}.git"
 
 
-def push_pr_head(num, sha, branch):
-    """Without Gitea's bare repository on this machine, the PR's head commit goes to
-    Gitea the other way: fetched from GitHub into a cache under .tools/tmp, and pushed
-    to Gitea as the branch github-pr/<N> - the branch the PR is made from anyway. Only
-    that one ref is pushed; branches, tags and Gitea's own refs/pull/* are not touched.
-    True when the branch is there afterwards."""
-    cache = os.path.join(HERE, "tmp", "github-to-gitea-git", OWNER, NAME + ".git")
+def fetch_commit(git_dir, num, sha, ref):
+    """Fetch the commit sha from GitHub into git_dir as ref; True when ref is sha after.
+
+    GitHub's refs/pull/<N>/head is tried first, then the commit by its name: that ref
+    is not always there or current. cloudflare/moq-rs #317 had only refs/pull/317/merge,
+    storytold/figcraft #2396's ref was a commit behind the PR, and a PR opened after
+    the repository's git fetch has nothing fetched yet - but GitHub serves a commit of
+    its fork network by name."""
     gh_token = github_token(GITHUB_REPO.split("/")[0])
+    env = git_auth_env(gh_token) if gh_token else dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    sources = ([f"refs/pull/{num}/head"] if ref.endswith("/head") else []) + [sha]
+    for src in sources:
+        r = subprocess.run(["git", "-C", git_dir, "fetch", "--quiet", "--no-tags", github_git_url(),
+                            f"+{src}:{ref}"], env=env, capture_output=True, text=True)
+        got = subprocess.run(["git", "-C", git_dir, "rev-parse", "--verify", "--quiet", ref],
+                             capture_output=True, text=True).stdout.strip()
+        if r.returncode == 0 and got == sha:
+            return True
+        if r.returncode != 0 and src == sources[-1]:
+            log(f"  PR #{num}: fetching {sha[:10]} from GitHub failed: {(r.stdout + r.stderr).strip()}")
+        elif got and got != sha:
+            log(f"  PR #{num}: GitHub's {src} is {got[:10]}, not {sha[:10]}; fetching the commit by name")
+    return False
+
+
+def push_commit(num, sha, branch, ref):
+    """Without Gitea's bare repository on this machine, a commit Gitea does not have
+    goes to Gitea the other way: fetched from GitHub into a cache under .tools/tmp, and
+    pushed to Gitea as branch - github-pr/<N> for a PR's head, the PR's own base branch
+    when GitHub deleted it. Only that one ref is pushed; other branches, tags and
+    Gitea's own refs/pull/* are not touched. True when the branch is there afterwards."""
+    cache = os.path.join(HERE, "tmp", "github-to-gitea-git", OWNER, NAME + ".git")
     try:
         if not os.path.exists(os.path.join(cache, "HEAD")):
             os.makedirs(cache, exist_ok=True)
             subprocess.run(["git", "init", "--quiet", "--bare", cache], check=True)
         log(f"  PR #{num}: fetching {sha[:10]} from GitHub, to push it to Gitea as {branch}")
-        subprocess.run(["git", "-C", cache, "fetch", "--quiet", "--no-tags", github_git_url(),
-                        f"+refs/pull/{num}/head:refs/github-pull/{num}/head"], check=True,
-                       env=git_auth_env(gh_token) if gh_token else dict(os.environ, GIT_TERMINAL_PROMPT="0"))
-        got = subprocess.run(["git", "-C", cache, "rev-parse", f"refs/github-pull/{num}/head"],
-                             capture_output=True, text=True, check=True).stdout.strip()
-        if got != sha:
-            log(f"  PR #{num}: GitHub's refs/pull/{num}/head is {got[:10]}, not {sha[:10]}; not pushed")
+        if not fetch_commit(cache, num, sha, ref):
             return False
         if DRY:
             log(f"    [dry-run] git push {gitea_git_url()} {sha}:refs/heads/{branch}")
@@ -977,37 +1035,80 @@ def push_pr_head(num, sha, branch):
             log((r.stdout + r.stderr).rstrip())
             raise subprocess.CalledProcessError(r.returncode, r.args)
     except (subprocess.CalledProcessError, OSError) as e:
-        log(f"  PR #{num}: pushing the head commit to Gitea failed: {e}")
+        log(f"  PR #{num}: pushing {sha[:10]} to Gitea failed: {e}")
         return False
     s, _ = gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))
     return s == 200
 
 
+def gitea_branch(num, branch, sha, ref):
+    """Make Gitea's branch at sha, bringing the commit from GitHub when Gitea does not
+    have it. Returns (status, detail) of the step that decided: 201 when it is there."""
+    if gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))[0] == 200:
+        return 201, None
+    has_commit = gt("GET", f"/git/commits/{sha}?stat=false&verification=false&files=false")[0] == 200
+    if not has_commit and not DRY:
+        bare = find_bare()
+        if bare is None:
+            # Asking Gitea to make a branch of a commit it does not have only writes a 500
+            # to its log: push the commit at once.
+            return (201, None) if push_commit(num, sha, branch, ref) else (404, "the push did not work")
+        if not fetch_commit(bare, num, sha, ref):
+            return 404, f"fetching it into Gitea's bare repository {bare} did not work"
+    return gt("POST", "/branches", {"new_branch_name": branch, "old_ref_name": sha})
+
+
 def create_pull(num):
     pr = gh(f"repos/{GITHUB_REPO}/pulls/{num}")
     branch = f"github-pr/{num}"
-    s, _ = gt("GET", "/branches/" + urllib.parse.quote(branch, safe=""))
-    if s != 200:
-        sha = pr["head"]["sha"]
-        # Without the bare repository here, a commit Gitea does not have is pushed at
-        # once: asking Gitea to make a branch of it first only writes a 500 to its log.
-        has_commit = gt("GET", f"/git/commits/{sha}?stat=false&verification=false&files=false")[0] == 200
-        if not has_commit and find_bare() is None and not DRY:
-            s, d = (201, None) if push_pr_head(num, sha, branch) else (404, "the push did not work")
-        else:
-            s, d = gt("POST", "/branches", {"new_branch_name": branch, "old_ref_name": sha})
+    sha = pr["head"]["sha"]
+    s, d = gitea_branch(num, branch, sha, f"refs/github-pull/{num}/head")
+    if s != 201 and not DRY:
+        fail(f"PR #{num}: head commit {sha[:10]} is missing from the Gitea repository, and bringing it "
+             f"from GitHub did not work ({s} {d}; see above). Run the script on the machine that has "
+             f"Gitea's bare repository (setting bare_repo), or with a Gitea token that may push. "
+             f"The PR is not made an issue: the numbers would get out of step.")
+    base = pr["base"]["ref"]
+    if gt("GET", "/branches/" + urllib.parse.quote(base, safe=""))[0] != 200:
+        # GitHub deleted the base branch of this PR - a stacked PR into another PR's branch
+        # (storytold/craft-libs #1185 into codex/vector-file-imports). Gitea makes a PR only
+        # into a branch that exists, so the base is made again at the commit GitHub's PR has
+        # as its base; the PR then reads as it does on GitHub.
+        log(f"  PR #{num}: its base branch {base} is gone on GitHub; making it in Gitea at "
+            f"{pr['base']['sha'][:10]}, the PR's base commit")
+        s, d = gitea_branch(num, base, pr["base"]["sha"], f"refs/github-pull/{num}/base")
         if s != 201 and not DRY:
-            fail(f"PR #{num}: head commit {pr['head']['sha'][:10]} is missing from the Gitea repository ({s} {d}),\n"
-                     f"and pushing it from GitHub did not work either (see above). Run the script on the machine "
-                     f"that has Gitea's bare repository (setting bare_repo), or with a Gitea token that may push. "
-                     f"The PR is not made an issue: the numbers would get out of step.")
+            fail(f"PR #{num}: its base branch {base} is gone on GitHub, and making it in Gitea at "
+                 f"{pr['base']['sha'][:10]} did not work ({s} {d}).")
     s, d = gt("POST", "/pulls", {"title": pr["title"], "body": attribution(pr) + (pr.get("body") or ""),
-                                 "head": branch, "base": pr["base"]["ref"],
+                                 "head": branch, "base": base,
                                  "labels": label_ids(pr.get("labels")),
                                  "milestone": milestone_id(pr.get("milestone"))})
     if s != 201 and not DRY:
-        fail(f"PR #{num}: Gitea did not create the PR: {s} {d}")
+        fail(f"PR #{num}: Gitea did not create the PR: {s} {d}" + index_hint(s, d))
     return d
+
+
+def index_hint(status, data):
+    """What to do when Gitea's issue counter is behind its issues.
+
+    Gitea numbers a new issue or PR from its issue_index table, which a migration sets
+    only when it finishes (RecalculateIssueIndexForRepo). After a migration that broke
+    off - godotengine/godot at 42,535 issues - the counter stays below the issues it
+    did import, so every new issue takes a number that is already used: "UNIQUE
+    constraint failed: issue.repo_id, issue.index". Gitea's API cannot set the counter."""
+    if not re.search(r"UNIQUE constraint failed: issue\.repo_id, issue\.index|duplicate key.*issue.*index",
+                     str(data)):
+        return ""
+    s, d = gt("GET", "")
+    rid = d.get("id") if s == 200 and isinstance(d, dict) else "<repository id>"
+    return (f"\n  Gitea's issue counter for {OWNER}/{NAME} is behind the issues it has - a migration "
+            f"that broke off does not set it - so each new issue gets a number already used. With "
+            f"Gitea stopped, set it from the highest number (SQLite; Gitea's database is gitea.db "
+            f"under its data directory):\n"
+            f"    sqlite3 gitea.db \"UPDATE issue_index SET max_index = (SELECT MAX(\\\"index\\\") FROM issue "
+            f"WHERE repo_id = {rid}) WHERE group_id = {rid};\"\n"
+            f"  then start Gitea and run this again.")
 
 
 def create_issue(item):
@@ -1015,7 +1116,7 @@ def create_issue(item):
                                   "labels": label_ids(item.get("labels")),
                                   "milestone": milestone_id(item.get("milestone"))})
     if s != 201 and not DRY:
-        fail(f"Issue #{item['number']}: Gitea did not create the issue: {s} {d}")
+        fail(f"Issue #{item['number']}: Gitea did not create the issue: {s} {d}" + index_hint(s, d))
     return d
 
 
