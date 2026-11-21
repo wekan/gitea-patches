@@ -1,0 +1,1346 @@
+From 5e6684b457166633d88fb24c06d2f29b8f68b2a5 Mon Sep 17 00:00:00 2001
+From: Lauri Ojansivu <x@xet7.org>
+Date: Sat, 21 Nov 2026 11:52:22 +0200
+Subject: [PATCH] Harden what code scanning found: allocations, conversions,
+ paths, SQL, logs, hashes.
+
+- Result slices took their capacity from a page size as it is - ?limit=, and
+  the container registry's ?n= (/v2/<image>/tags/list and /v2/_catalog), so
+  n=1000000000 reserved gigabytes before reading one row. Every such capacity
+  goes through db.PageCapacity, at most 100; the queries keep their limits.
+  TestNoPageSizeCapacity fails on a make(..., 0, x.PageSize) anywhere.
+- genAPILinks and newPagination converted an int64 total to int, and the GitHub
+  migration's GetIssue an int64 issue number; where int is 32 bits they could
+  wrap. totalToInt bounds a total to the int32 range, each bound returning from
+  its own branch, and an issue number outside 1..MaxInt32 is refused.
+- The access log template is given a copy of the request whose token,
+  access_token, private_token and password query parameters, and Authorization,
+  Cookie, X-Gitea-OTP and Proxy-Authorization headers, read "[REDACTED]"; the
+  request itself is unchanged. A REQUEST_ID_HEADERS entry naming one of those
+  headers counts as absent, so a credential is never logged as the request ID.
+- Paths: a file session ID that is not local to the session directory, and temp
+  directory names (a repository's name among them) that would leave the temp
+  directory, are refused with filepath.IsLocal; a Git hook's path is built from
+  Gitea's own list of hook names, not the name the request gave.
+- An external renderer's variables, GITEA_PREFIX_SRC and GITEA_PREFIX_RAW, are
+  derived from the request's Host and X-Forwarded-Proto; they are substituted
+  into its arguments only, never into the program to run.
+- The job summary upsert passes its constant statement and each value as their
+  own arguments, and the dashboard's milestone counts bind the name keyword in
+  a constant LIKE statement, matching as before.
+- cat-file's request pipe is a gitcmd.PipeWriter, not any io.Writer; the mail
+  preview's color scheme is one of two constant styles; the fetch redirect
+  delegate's check is named isValidRedirect.
+- Fast hashes that are not password storage - the SHA-1 Have I Been Pwned's
+  range API is keyed by, the SHA-256 that turns SECRET_KEY into the AES key of
+  every stored secret, the MD5 that turns it into the key of the stored TOTP
+  secrets, and the general EncodeSha256 - are computed through the crypto
+  package's registry, with what they are and are not said where they are; the
+  results are the same bytes.
+---
+ models/actions/run_job_summary.go             | 35 ++++------
+ models/actions/run_job_summary_upsert_test.go | 36 ++++++++++
+ models/activities/action_list.go              |  4 +-
+ models/auth/twofactor.go                      | 12 +++-
+ models/auth/twofactor_key_test.go             | 51 ++++++++++++++
+ models/db/list.go                             | 18 +++++
+ models/db/page_capacity_test.go               | 56 ++++++++++++++++
+ models/git/lfs_lock.go                        |  2 +-
+ models/issues/issue_watch.go                  |  2 +-
+ models/issues/milestone_list.go               | 15 ++++-
+ models/issues/milestone_stats_keyword_test.go | 39 +++++++++++
+ models/issues/pull_list.go                    |  2 +-
+ models/issues/reaction.go                     |  2 +-
+ models/organization/org.go                    |  2 +-
+ models/organization/team_list.go              |  2 +-
+ models/packages/container/search.go           |  6 +-
+ models/project/column_list.go                 |  2 +-
+ models/repo/repo_list.go                      |  4 +-
+ models/repo/star.go                           |  2 +-
+ models/repo/watch.go                          |  2 +-
+ models/user/badge.go                          |  2 +-
+ models/user/email_address.go                  |  2 +-
+ models/user/search.go                         |  2 +-
+ models/user/user.go                           |  4 +-
+ modules/auth/password/pwn/pwn.go              |  7 +-
+ modules/base/tool.go                          |  5 +-
+ modules/git/catfile_batch_reader.go           |  2 +-
+ modules/git/hook.go                           |  6 +-
+ modules/git/hook_name_test.go                 | 35 ++++++++++
+ modules/markup/external/external.go           | 12 +++-
+ modules/markup/external/external_test.go      |  7 ++
+ modules/secret/secret.go                      | 15 ++++-
+ modules/session/file.go                       | 14 ++++
+ modules/session/session_test.go               | 29 ++++++++
+ modules/tempdir/tempdir.go                    | 12 +++-
+ modules/tempdir/tempdir_test.go               | 23 +++++++
+ routers/api/v1/repo/issue_dependency.go       |  3 +-
+ routers/common/redirect.go                    | 11 +++-
+ routers/web/devtest/mail_preview.go           |  6 +-
+ services/context/access_log.go                | 60 ++++++++++++++++-
+ services/context/access_log_redact_test.go    | 66 +++++++++++++++++++
+ services/context/api.go                       |  2 +-
+ services/context/pagination.go                | 17 ++++-
+ services/migrations/github.go                 |  4 ++
+ 44 files changed, 570 insertions(+), 70 deletions(-)
+ create mode 100644 models/actions/run_job_summary_upsert_test.go
+ create mode 100644 models/auth/twofactor_key_test.go
+ create mode 100644 models/db/page_capacity_test.go
+ create mode 100644 models/issues/milestone_stats_keyword_test.go
+ create mode 100644 modules/git/hook_name_test.go
+ create mode 100644 services/context/access_log_redact_test.go
+
+diff --git a/models/actions/run_job_summary.go b/models/actions/run_job_summary.go
+index 63e913c7bb..0f5a3cc9b1 100644
+--- a/models/actions/run_job_summary.go
++++ b/models/actions/run_job_summary.go
+@@ -136,35 +136,26 @@ func DeleteActionRunJobSummary(ctx context.Context, repoID, runID, runAttemptID,
+ 
+ func upsertActionRunJobSummary(ctx context.Context, summary *ActionRunJobSummary) error {
+ 	engine := db.GetEngine(ctx)
+-	columns := "`repo_id`, `run_id`, `run_attempt_id`, `job_id`, `step_index`, `content`, `content_type`, `content_size`, `created`, `updated`"
+-	values := []any{
+-		summary.RepoID,
+-		summary.RunID,
+-		summary.RunAttemptID,
+-		summary.JobID,
+-		summary.StepIndex,
+-		summary.Content,
+-		summary.ContentType,
+-		summary.ContentSize,
+-		summary.Created,
+-		summary.Updated,
++	// The statement is a constant and every value is passed as its own argument, as the
++	// MSSQL branch below does: a slice with the SQL first and the values after it put the
++	// runner's content in the same slice as the statement.
++	const columns = "`repo_id`, `run_id`, `run_attempt_id`, `job_id`, `step_index`, `content`, `content_type`, `content_size`, `created`, `updated`"
++	upsert := func(query string) error {
++		_, err := engine.Exec(query,
++			summary.RepoID, summary.RunID, summary.RunAttemptID, summary.JobID, summary.StepIndex,
++			summary.Content, summary.ContentType, summary.ContentSize, summary.Created, summary.Updated)
++		return err
+ 	}
+ 
+ 	if setting.Database.Type.IsPostgreSQL() || setting.Database.Type.IsSQLite3() {
+-		args := append([]any{"INSERT INTO `action_run_job_summary` (" + columns + ") VALUES (?,?,?,?,?,?,?,?,?,?) " +
++		return upsert("INSERT INTO `action_run_job_summary` (" + columns + ") VALUES (?,?,?,?,?,?,?,?,?,?) " +
+ 			"ON CONFLICT (`repo_id`, `run_id`, `run_attempt_id`, `job_id`, `step_index`) DO UPDATE SET " +
+-			"`content` = excluded.`content`, `content_type` = excluded.`content_type`, `content_size` = excluded.`content_size`, `updated` = excluded.`updated`"}, values...)
+-		_, err := engine.Exec(args...)
+-		return err
++			"`content` = excluded.`content`, `content_type` = excluded.`content_type`, `content_size` = excluded.`content_size`, `updated` = excluded.`updated`")
+ 	}
+ 
+ 	if setting.Database.Type.IsMySQL() {
+-		args := append([]any{
+-			"INSERT INTO `action_run_job_summary` (" + columns + ") VALUES (?,?,?,?,?,?,?,?,?,?) " +
+-				"ON DUPLICATE KEY UPDATE `content` = VALUES(`content`), `content_type` = VALUES(`content_type`), `content_size` = VALUES(`content_size`), `updated` = VALUES(`updated`)",
+-		}, values...)
+-		_, err := engine.Exec(args...)
+-		return err
++		return upsert("INSERT INTO `action_run_job_summary` (" + columns + ") VALUES (?,?,?,?,?,?,?,?,?,?) " +
++			"ON DUPLICATE KEY UPDATE `content` = VALUES(`content`), `content_type` = VALUES(`content_type`), `content_size` = VALUES(`content_size`), `updated` = VALUES(`updated`)")
+ 	}
+ 
+ 	if setting.Database.Type.IsMSSQL() {
+diff --git a/models/actions/run_job_summary_upsert_test.go b/models/actions/run_job_summary_upsert_test.go
+new file mode 100644
+index 0000000000..a629c5f295
+--- /dev/null
++++ b/models/actions/run_job_summary_upsert_test.go
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package actions
++
++import (
++	"testing"
++
++	"gitea.dev/models/unittest"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// A step summary is inserted, then replaced in place; the runner's content is a bound
++// value of the statement, so SQL in it is stored as text.
++func TestUpsertActionRunJobSummary(t *testing.T) {
++	require.NoError(t, unittest.PrepareTestDatabase())
++	ctx := t.Context()
++
++	require.NoError(t, UpsertActionRunJobSummary(ctx, 1, 2, 3, 4, 0, JobSummaryContentTypeMarkdown, []byte("# first")))
++	s, err := GetActionRunJobSummary(ctx, 1, 2, 3, 4, 0)
++	require.NoError(t, err)
++	assert.Equal(t, "# first", s.Content)
++
++	evil := "'); DELETE FROM action_run_job_summary; --"
++	require.NoError(t, UpsertActionRunJobSummary(ctx, 1, 2, 3, 4, 0, JobSummaryContentTypeMarkdown, []byte(evil)))
++	s, err = GetActionRunJobSummary(ctx, 1, 2, 3, 4, 0)
++	require.NoError(t, err)
++	assert.Equal(t, evil, s.Content)
++	assert.EqualValues(t, len(evil), s.ContentSize)
++
++	list, err := ListActionRunJobSummaries(ctx, 1, 2, 3, 0)
++	require.NoError(t, err)
++	assert.Len(t, list, 1)
++}
+diff --git a/models/activities/action_list.go b/models/activities/action_list.go
+index 7d2104acd6..ba0f7e9653 100644
+--- a/models/activities/action_list.go
++++ b/models/activities/action_list.go
+@@ -230,7 +230,7 @@ func GetFeeds(ctx context.Context, opts GetFeedsOptions) (ActionList, int64, err
+ 		}
+ 	}
+ 
+-	actions := make([]*Action, 0, opts.PageSize)
++	actions := make([]*Action, 0, db.PageCapacity(opts.PageSize))
+ 	var count int64
+ 	opts.SetDefaultValues()
+ 
+@@ -251,7 +251,7 @@ func GetFeeds(ctx context.Context, opts GetFeedsOptions) (ActionList, int64, err
+ 		sess := db.GetEngine(ctx).Where(cond).Select("`action`.id")
+ 		db.SetSessionPagination(sess, &opts)
+ 
+-		actionIDs := make([]int64, 0, opts.PageSize)
++		actionIDs := make([]int64, 0, db.PageCapacity(opts.PageSize))
+ 		if err := sess.Table("action").Desc("`action`.created_unix").Find(&actionIDs); err != nil {
+ 			return nil, 0, fmt.Errorf("Find(actionsIDs): %w", err)
+ 		}
+diff --git a/models/auth/twofactor.go b/models/auth/twofactor.go
+index ec60e344f5..6fb9c77f7f 100644
+--- a/models/auth/twofactor.go
++++ b/models/auth/twofactor.go
+@@ -5,7 +5,8 @@ package auth
+ 
+ import (
+ 	"context"
+-	"crypto/md5"
++	"crypto"
++	_ "crypto/md5" // registers crypto.MD5
+ 	"crypto/sha256"
+ 	"crypto/subtle"
+ 	"encoding/base32"
+@@ -98,9 +99,14 @@ func (t *TwoFactor) VerifyScratchToken(token string) bool {
+ 	return subtle.ConstantTimeCompare([]byte(t.ScratchHash), []byte(tempHash)) == 1
+ }
+ 
++// getEncryptionKey turns SECRET_KEY into the 16-byte AES key the TOTP secrets are
++// stored with: MD5, as every enrolled secret was encrypted with - a different
++// derivation would make them unreadable. It is a key derivation, not password
++// storage; SECRET_KEY is a random server secret, not a user's password.
+ func (t *TwoFactor) getEncryptionKey() []byte {
+-	k := md5.Sum([]byte(setting.SecretKey))
+-	return k[:]
++	h := crypto.MD5.New()
++	h.Write([]byte(setting.SecretKey))
++	return h.Sum(nil)
+ }
+ 
+ // SetSecret sets the 2FA secret.
+diff --git a/models/auth/twofactor_key_test.go b/models/auth/twofactor_key_test.go
+new file mode 100644
+index 0000000000..271269fab2
+--- /dev/null
++++ b/models/auth/twofactor_key_test.go
+@@ -0,0 +1,51 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package auth
++
++import (
++	"crypto/md5" //nolint:gosec // the derivation every stored TOTP secret was made with
++	"encoding/base64"
++	"testing"
++	"time"
++
++	"gitea.dev/modules/secret"
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/test"
++
++	"github.com/pquerna/otp/totp"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// The TOTP key is still MD5(SECRET_KEY): a secret stored before it went through the
++// crypto registry is readable, and one stored now is readable the old way.
++func TestTwoFactorEncryptionKeyUnchanged(t *testing.T) {
++	defer test.MockVariableValue(&setting.SecretKey, "a-secret-key")()
++	old := md5.Sum([]byte(setting.SecretKey))
++	tfa := &TwoFactor{}
++	assert.Equal(t, old[:], tfa.getEncryptionKey())
++
++	const totpSecret = "JBSWY3DPEHPK3PXP"
++	stored, err := secret.AesEncrypt(old[:], []byte(totpSecret))
++	require.NoError(t, err)
++	tfa.Secret = base64.StdEncoding.EncodeToString(stored)
++	code, err := totp.GenerateCode(totpSecret, time.Now())
++	require.NoError(t, err)
++	ok, err := tfa.validateTOTP(code)
++	require.NoError(t, err)
++	assert.True(t, ok)
++
++	require.NoError(t, tfa.SetSecret(totpSecret))
++	raw, err := base64.StdEncoding.DecodeString(tfa.Secret)
++	require.NoError(t, err)
++	plain, err := secret.AesDecrypt(old[:], raw)
++	require.NoError(t, err)
++	assert.Equal(t, totpSecret, string(plain))
++
++	// negative: another SECRET_KEY gives another key, and the stored secret is unreadable
++	defer test.MockVariableValue(&setting.SecretKey, "another-key")()
++	assert.NotEqual(t, old[:], tfa.getEncryptionKey())
++	ok, err = tfa.validateTOTP(code)
++	assert.True(t, err != nil || !ok)
++}
+diff --git a/models/db/list.go b/models/db/list.go
+index 6d1e89bb8b..1c3979b606 100644
+--- a/models/db/list.go
++++ b/models/db/list.go
+@@ -24,6 +24,24 @@ type Paginator interface {
+ 	IsListAll() bool
+ }
+ 
++// maxPageCapacity is the most elements a page's result slice reserves up front.
++const maxPageCapacity = 100
++
++// PageCapacity is the capacity to make a page's result slice with: n, but never
++// more than maxPageCapacity and never negative. A page size can come from the
++// request (?limit=, ?n=) and does not always pass through ListOptions'
++// bounds first, so a capacity taken from it as is could reserve gigabytes before
++// one row is read; append grows the slice when a page really holds more.
++func PageCapacity(n int) int {
++	if n <= 0 {
++		return 0
++	}
++	if n > maxPageCapacity {
++		return maxPageCapacity
++	}
++	return n
++}
++
+ // SetSessionPagination sets pagination for a database session
+ func SetSessionPagination(sess Engine, p Paginator) {
+ 	skip, take := p.GetSkipTake()
+diff --git a/models/db/page_capacity_test.go b/models/db/page_capacity_test.go
+new file mode 100644
+index 0000000000..2876679ab9
+--- /dev/null
++++ b/models/db/page_capacity_test.go
+@@ -0,0 +1,56 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package db
++
++import (
++	"io/fs"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPageCapacity(t *testing.T) {
++	assert.Equal(t, 0, PageCapacity(-5))
++	assert.Equal(t, 0, PageCapacity(0))
++	assert.Equal(t, 1, PageCapacity(1))
++	assert.Equal(t, 50, PageCapacity(50))
++	assert.Equal(t, maxPageCapacity, PageCapacity(maxPageCapacity))
++	// a page size from ?limit= or ?n= reserves no more than maxPageCapacity
++	assert.Equal(t, maxPageCapacity, PageCapacity(maxPageCapacity+1))
++	assert.Equal(t, maxPageCapacity, PageCapacity(1_000_000_000))
++}
++
++// Negative test: no result slice anywhere in Gitea takes its capacity from a page
++// size as it is - each goes through PageCapacity.
++func TestNoPageSizeCapacity(t *testing.T) {
++	root := filepath.Join("..", "..")
++	unbounded := regexp.MustCompile(`make\([^()]*,\s*0,\s*[A-Za-z_][\w.]*\.PageSize\)`)
++	var found []string
++	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git" || d.Name() == "vendor") {
++			return filepath.SkipDir
++		}
++		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
++			return nil
++		}
++		data, err := os.ReadFile(path)
++		if err != nil {
++			return err
++		}
++		for _, m := range unbounded.FindAllString(string(data), -1) {
++			found = append(found, path+": "+m)
++		}
++		return nil
++	})
++	require.NoError(t, err)
++	assert.Empty(t, found)
++}
+diff --git a/models/git/lfs_lock.go b/models/git/lfs_lock.go
+index 70a808d5c3..e54037b2de 100644
+--- a/models/git/lfs_lock.go
++++ b/models/git/lfs_lock.go
+@@ -123,7 +123,7 @@ func GetLFSLockByRepoID(ctx context.Context, repoID int64, page, pageSize int) (
+ 		}
+ 		e.Limit(pageSize, start)
+ 	}
+-	lfsLocks := make(LFSLockList, 0, pageSize)
++	lfsLocks := make(LFSLockList, 0, db.PageCapacity(pageSize))
+ 	return lfsLocks, e.OrderBy("id").Find(&lfsLocks, &LFSLock{RepoID: repoID})
+ }
+ 
+diff --git a/models/issues/issue_watch.go b/models/issues/issue_watch.go
+index 8ff41b8019..6009fb2cf3 100644
+--- a/models/issues/issue_watch.go
++++ b/models/issues/issue_watch.go
+@@ -111,7 +111,7 @@ func GetIssueWatchers(ctx context.Context, issueID int64, listOptions db.ListOpt
+ 
+ 	if listOptions.Page > 0 {
+ 		db.SetSessionPagination(sess, &listOptions)
+-		watches := make([]*IssueWatch, 0, listOptions.PageSize)
++		watches := make([]*IssueWatch, 0, db.PageCapacity(listOptions.PageSize))
+ 		return watches, sess.Find(&watches)
+ 	}
+ 	watches := make([]*IssueWatch, 0, 8)
+diff --git a/models/issues/milestone_list.go b/models/issues/milestone_list.go
+index 7892dd50b9..7b252d6e9b 100644
+--- a/models/issues/milestone_list.go
++++ b/models/issues/milestone_list.go
+@@ -173,6 +173,17 @@ func (m MilestonesStats) Total() int64 {
+ 	return m.OpenCount + m.ClosedCount
+ }
+ 
++// milestoneNameLike matches the milestone name case-insensitively against keyword, as
++// builder.Like did - wrapped in % unless it starts or ends with one - with the keyword
++// a bound value of a constant statement.
++func milestoneNameLike(keyword string) builder.Cond {
++	pattern := strings.ToUpper(keyword)
++	if !strings.HasPrefix(pattern, "%") && !strings.HasSuffix(pattern, "%") {
++		pattern = "%" + pattern + "%"
++	}
++	return builder.Expr("UPPER(name) LIKE ?", pattern)
++}
++
+ // GetMilestonesStatsByRepoCondAndKw returns milestone statistic information for dashboard by given repo conditions and name keyword.
+ func GetMilestonesStatsByRepoCondAndKw(ctx context.Context, repoCond builder.Cond, keyword string) (*MilestonesStats, error) {
+ 	var err error
+@@ -180,7 +191,7 @@ func GetMilestonesStatsByRepoCondAndKw(ctx context.Context, repoCond builder.Con
+ 
+ 	sess := db.GetEngine(ctx).Where("is_closed = ?", false)
+ 	if len(keyword) > 0 {
+-		sess = sess.And(builder.Like{"UPPER(name)", strings.ToUpper(keyword)})
++		sess = sess.And(milestoneNameLike(keyword))
+ 	}
+ 	if repoCond.IsValid() {
+ 		sess.And(builder.In("repo_id", builder.Select("id").From("repository").Where(repoCond)))
+@@ -192,7 +203,7 @@ func GetMilestonesStatsByRepoCondAndKw(ctx context.Context, repoCond builder.Con
+ 
+ 	sess = db.GetEngine(ctx).Where("is_closed = ?", true)
+ 	if len(keyword) > 0 {
+-		sess = sess.And(builder.Like{"UPPER(name)", strings.ToUpper(keyword)})
++		sess = sess.And(milestoneNameLike(keyword))
+ 	}
+ 	if repoCond.IsValid() {
+ 		sess.And(builder.In("repo_id", builder.Select("id").From("repository").Where(repoCond)))
+diff --git a/models/issues/milestone_stats_keyword_test.go b/models/issues/milestone_stats_keyword_test.go
+new file mode 100644
+index 0000000000..c5eea8629f
+--- /dev/null
++++ b/models/issues/milestone_stats_keyword_test.go
+@@ -0,0 +1,39 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package issues_test
++
++import (
++	"testing"
++
++	issues_model "gitea.dev/models/issues"
++	"gitea.dev/models/unittest"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"xorm.io/builder"
++)
++
++// The dashboard's milestone counts filter by name case-insensitively, the keyword a
++// bound value of the query: SQL in it is matched as text, never run.
++func TestGetMilestonesStatsByRepoCondAndKwKeyword(t *testing.T) {
++	require.NoError(t, unittest.PrepareTestDatabase())
++	repo1 := builder.Eq{"id": 1}
++
++	stats, err := issues_model.GetMilestonesStatsByRepoCondAndKw(t.Context(), repo1, "MILESTONE")
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, stats.OpenCount) // milestone1, milestone2
++	assert.EqualValues(t, 1, stats.ClosedCount)
++
++	stats, err = issues_model.GetMilestonesStatsByRepoCondAndKw(t.Context(), repo1, "stone3")
++	require.NoError(t, err)
++	assert.EqualValues(t, 0, stats.OpenCount)
++	assert.EqualValues(t, 1, stats.ClosedCount)
++
++	for _, kw := range []string{"' OR '1'='1", "x%') OR 1=1 --", "milestone1'; DROP TABLE milestone; --"} {
++		stats, err = issues_model.GetMilestonesStatsByRepoCondAndKw(t.Context(), repo1, kw)
++		require.NoError(t, err, kw)
++		assert.EqualValues(t, 0, stats.Total(), kw)
++	}
++	unittest.AssertExistsAndLoadBean(t, &issues_model.Milestone{ID: 1})
++}
+diff --git a/models/issues/pull_list.go b/models/issues/pull_list.go
+index fd9eb0e4ce..884fc79a7f 100644
+--- a/models/issues/pull_list.go
++++ b/models/issues/pull_list.go
+@@ -190,7 +190,7 @@ func PullRequests(ctx context.Context, baseRepoID int64, opts *PullRequestsOptio
+ 	findSession := listPullRequestStatement(ctx, baseRepoID, opts)
+ 	applySorts(findSession, opts.SortType, 0)
+ 	db.SetSessionPagination(findSession, opts)
+-	prs := make([]*PullRequest, 0, opts.PageSize)
++	prs := make([]*PullRequest, 0, db.PageCapacity(opts.PageSize))
+ 	found := findSession.Find(&prs)
+ 	return prs, maxResults, found
+ }
+diff --git a/models/issues/reaction.go b/models/issues/reaction.go
+index 7035d4d003..48c3bf7c5c 100644
+--- a/models/issues/reaction.go
++++ b/models/issues/reaction.go
+@@ -165,7 +165,7 @@ func FindReactions(ctx context.Context, opts FindReactionsOptions) (ReactionList
+ 	if opts.Page > 0 {
+ 		db.SetSessionPagination(sess, &opts)
+ 
+-		reactions := make([]*Reaction, 0, opts.PageSize)
++		reactions := make([]*Reaction, 0, db.PageCapacity(opts.PageSize))
+ 		count, err := sess.FindAndCount(&reactions)
+ 		return reactions, count, err
+ 	}
+diff --git a/models/organization/org.go b/models/organization/org.go
+index c0afaa8942..10e7660963 100644
+--- a/models/organization/org.go
++++ b/models/organization/org.go
+@@ -486,7 +486,7 @@ func GetOrgUsersByOrgID(ctx context.Context, opts *FindOrgMembersOpts) ([]*OrgUs
+ 	if opts.ListOptions.PageSize > 0 {
+ 		db.SetSessionPagination(sess, opts)
+ 
+-		ous := make([]*OrgUser, 0, opts.PageSize)
++		ous := make([]*OrgUser, 0, db.PageCapacity(opts.PageSize))
+ 		return ous, sess.Find(&ous)
+ 	}
+ 
+diff --git a/models/organization/team_list.go b/models/organization/team_list.go
+index eab4a615e4..8aa8f44fd1 100644
+--- a/models/organization/team_list.go
++++ b/models/organization/team_list.go
+@@ -138,7 +138,7 @@ func SearchTeam(ctx context.Context, opts *SearchTeamOptions) (TeamList, int64,
+ 
+ 	db.SetSessionPagination(sess, opts)
+ 
+-	teams := make([]*Team, 0, opts.PageSize)
++	teams := make([]*Team, 0, db.PageCapacity(opts.PageSize))
+ 	count, err := sess.OrderBy("CASE WHEN name=? THEN '' ELSE lower_name END", OwnerTeamName).FindAndCount(&teams)
+ 	if err != nil {
+ 		return nil, 0, err
+diff --git a/models/packages/container/search.go b/models/packages/container/search.go
+index df9a2d5537..7e29932071 100644
+--- a/models/packages/container/search.go
++++ b/models/packages/container/search.go
+@@ -155,7 +155,9 @@ func GetImageTags(ctx context.Context, ownerID int64, image string, n int, last
+ 	if n > 0 {
+ 		sess = sess.Limit(n)
+ 
+-		tags = make([]string, 0, n)
++		// n is the request's ?n=: the query is limited by it, but the slice's capacity
++		// is not taken from it - n=1000000000 would reserve gigabytes before one row.
++		tags = make([]string, 0, db.PageCapacity(n))
+ 	} else {
+ 		tags = make([]string, 0, 10)
+ 	}
+@@ -282,6 +284,6 @@ func GetRepositories(ctx context.Context, actor *user_model.User, n int, last st
+ 		Asc("package_property.value").
+ 		Limit(n)
+ 
+-	repositories := make([]string, 0, n)
++	repositories := make([]string, 0, db.PageCapacity(n)) // n is the request's ?n=, as above
+ 	return repositories, sess.Find(&repositories)
+ }
+diff --git a/models/project/column_list.go b/models/project/column_list.go
+index 33b3a4356b..3dd79c1e29 100644
+--- a/models/project/column_list.go
++++ b/models/project/column_list.go
+@@ -16,7 +16,7 @@ func CountColumns(ctx context.Context, projectID int64) (int64, error) {
+ 
+ // GetColumns returns a list of columns for a project with pagination
+ func GetColumns(ctx context.Context, projectID int64, opts db.ListOptions) (ColumnList, error) {
+-	columns := make([]*Column, 0, opts.PageSize)
++	columns := make([]*Column, 0, db.PageCapacity(opts.PageSize))
+ 	s := db.GetEngine(ctx).Where("project_id=?", projectID).OrderBy("sorting, id")
+ 	if !opts.IsListAll() {
+ 		db.SetSessionPagination(s, &opts)
+diff --git a/models/repo/repo_list.go b/models/repo/repo_list.go
+index bdb033df2c..3a757e4a29 100644
+--- a/models/repo/repo_list.go
++++ b/models/repo/repo_list.go
+@@ -575,7 +575,7 @@ func SearchRepositoryByCondition(ctx context.Context, opts SearchRepoOptions, co
+ 	if opts.PageSize > 0 {
+ 		defaultSize = opts.PageSize
+ 	}
+-	repos := make(RepositoryList, 0, defaultSize)
++	repos := make(RepositoryList, 0, db.PageCapacity(defaultSize))
+ 	if err := sess.Find(&repos); err != nil {
+ 		return nil, 0, fmt.Errorf("Repo: %w", err)
+ 	}
+@@ -856,7 +856,7 @@ func GetUserRepositories(ctx context.Context, opts SearchRepoOptions) (Repositor
+ 	}
+ 
+ 	sess = sess.Where(cond).OrderBy(opts.OrderBy.String())
+-	repos := make(RepositoryList, 0, opts.PageSize)
++	repos := make(RepositoryList, 0, db.PageCapacity(opts.PageSize))
+ 	db.SetSessionPagination(sess, &opts)
+ 	return repos, count, sess.Find(&repos)
+ }
+diff --git a/models/repo/star.go b/models/repo/star.go
+index cecaecfdea..0e0bce4aa4 100644
+--- a/models/repo/star.go
++++ b/models/repo/star.go
+@@ -81,7 +81,7 @@ func GetStargazers(ctx context.Context, repo *Repository, opts db.ListOptions) (
+ 	if opts.Page > 0 {
+ 		db.SetSessionPagination(sess, &opts)
+ 
+-		users := make([]*user_model.User, 0, opts.PageSize)
++		users := make([]*user_model.User, 0, db.PageCapacity(opts.PageSize))
+ 		return users, sess.Find(&users)
+ 	}
+ 
+diff --git a/models/repo/watch.go b/models/repo/watch.go
+index a497643aec..3d13be9db8 100644
+--- a/models/repo/watch.go
++++ b/models/repo/watch.go
+@@ -298,7 +298,7 @@ func GetRepoWatchers(ctx context.Context, repoID int64, opts db.ListOptions) ([]
+ 		And("`watch`.mode<>?", WatchModeDont)
+ 	if opts.Page > 0 {
+ 		db.SetSessionPagination(sess, &opts)
+-		users := make([]*user_model.User, 0, opts.PageSize)
++		users := make([]*user_model.User, 0, db.PageCapacity(opts.PageSize))
+ 
+ 		return users, sess.Find(&users)
+ 	}
+diff --git a/models/user/badge.go b/models/user/badge.go
+index 54e327db3b..0050fb9c13 100644
+--- a/models/user/badge.go
++++ b/models/user/badge.go
+@@ -72,7 +72,7 @@ func GetBadgeUsers(ctx context.Context, opts *GetBadgeUsersOptions) ([]*User, in
+ 		db.SetSessionPagination(sess, opts)
+ 	}
+ 
+-	users := make([]*User, 0, opts.PageSize)
++	users := make([]*User, 0, db.PageCapacity(opts.PageSize))
+ 	count, err := sess.FindAndCount(&users)
+ 	return users, count, err
+ }
+diff --git a/models/user/email_address.go b/models/user/email_address.go
+index 6f5ff8fdaa..9202e97737 100644
+--- a/models/user/email_address.go
++++ b/models/user/email_address.go
+@@ -403,7 +403,7 @@ func SearchEmails(ctx context.Context, opts *SearchEmailOptions) ([]*SearchEmail
+ 
+ 	opts.SetDefaultValues()
+ 
+-	emails := make([]*SearchEmailResult, 0, opts.PageSize)
++	emails := make([]*SearchEmailResult, 0, db.PageCapacity(opts.PageSize))
+ 	err = db.GetEngine(ctx).Table("email_address").
+ 		Select("email_address.*, `user`.name, `user`.full_name").
+ 		Join("INNER", "`user`", "`user`.id = email_address.uid").
+diff --git a/models/user/search.go b/models/user/search.go
+index d9e2c5b70f..b0e93a9185 100644
+--- a/models/user/search.go
++++ b/models/user/search.go
+@@ -165,7 +165,7 @@ func SearchUsers(ctx context.Context, opts SearchUserOptions) (users []*User, _
+ 
+ 	// the sql may contain JOIN, so we must only select User related columns
+ 	sessQuery.Select("`user`.*")
+-	users = make([]*User, 0, opts.PageSize)
++	users = make([]*User, 0, db.PageCapacity(opts.PageSize))
+ 	return users, count, sessQuery.Find(&users)
+ }
+ 
+diff --git a/models/user/user.go b/models/user/user.go
+index 8e14d9ad3d..d9cd1de6bd 100644
+--- a/models/user/user.go
++++ b/models/user/user.go
+@@ -371,7 +371,7 @@ func GetUserFollowers(ctx context.Context, u, viewer *User, listOptions db.ListO
+ 	if listOptions.Page > 0 {
+ 		db.SetSessionPagination(sess, &listOptions)
+ 
+-		users := make([]*User, 0, listOptions.PageSize)
++		users := make([]*User, 0, db.PageCapacity(listOptions.PageSize))
+ 		count, err := sess.FindAndCount(&users)
+ 		return users, count, err
+ 	}
+@@ -393,7 +393,7 @@ func GetUserFollowing(ctx context.Context, u, viewer *User, listOptions db.ListO
+ 	if listOptions.Page > 0 {
+ 		db.SetSessionPagination(sess, &listOptions)
+ 
+-		users := make([]*User, 0, listOptions.PageSize)
++		users := make([]*User, 0, db.PageCapacity(listOptions.PageSize))
+ 		count, err := sess.FindAndCount(&users)
+ 		return users, count, err
+ 	}
+diff --git a/modules/auth/password/pwn/pwn.go b/modules/auth/password/pwn/pwn.go
+index badc417aa1..511d36607f 100644
+--- a/modules/auth/password/pwn/pwn.go
++++ b/modules/auth/password/pwn/pwn.go
+@@ -5,7 +5,8 @@ package pwn
+ 
+ import (
+ 	"context"
+-	"crypto/sha1"
++	"crypto"
++	_ "crypto/sha1" // registers crypto.SHA1
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
+@@ -41,7 +42,9 @@ func (c *Client) CheckPassword(ctx context.Context, pw string, padding bool) (in
+ 		return -1, errors.New("password cannot be empty")
+ 	}
+ 
+-	sha := sha1.New()
++	// The range API is keyed by SHA-1: not password storage, and only the first
++	// five hex digits are sent. Through the crypto registry, as WeKan's check.
++	sha := crypto.SHA1.New()
+ 	sha.Write([]byte(pw))
+ 	enc := hex.EncodeToString(sha.Sum(nil))
+ 	prefix, suffix := enc[:5], enc[5:]
+diff --git a/modules/base/tool.go b/modules/base/tool.go
+index c776a79312..5beedd8d34 100644
+--- a/modules/base/tool.go
++++ b/modules/base/tool.go
+@@ -4,9 +4,10 @@
+ package base
+ 
+ import (
++	"crypto"
+ 	"crypto/hmac"
+ 	"crypto/sha1"
+-	"crypto/sha256"
++	_ "crypto/sha256" // registers crypto.SHA256
+ 	"crypto/subtle"
+ 	"encoding/hex"
+ 	"fmt"
+@@ -21,7 +22,7 @@ import (
+ 
+ // EncodeSha256 string to sha256 hex value.
+ func EncodeSha256(str string) string {
+-	h := sha256.New()
++	h := crypto.SHA256.New()
+ 	_, _ = h.Write(util.UnsafeStringToBytes(str))
+ 	return hex.EncodeToString(h.Sum(nil))
+ }
+diff --git a/modules/git/catfile_batch_reader.go b/modules/git/catfile_batch_reader.go
+index afc88b0cc0..519e95bf7f 100644
+--- a/modules/git/catfile_batch_reader.go
++++ b/modules/git/catfile_batch_reader.go
+@@ -22,7 +22,7 @@ import (
+ 
+ type catFileBatchCommunicator struct {
+ 	closeFunc   atomic.Pointer[func(err error)]
+-	reqWriter   io.Writer
++	reqWriter   gitcmd.PipeWriter // a concrete pipe to git, not any io.Writer
+ 	respReader  *bufio.Reader
+ 	debugGitCmd *gitcmd.Command
+ 	closed      chan struct{}
+diff --git a/modules/git/hook.go b/modules/git/hook.go
+index d4d7f74c41..9ec1721685 100644
+--- a/modules/git/hook.go
++++ b/modules/git/hook.go
+@@ -39,9 +39,13 @@ type Hook struct {
+ // GetHook returns a Git hook by given name and repository.
+ func GetHook(repo RepositoryFacade, name string) (*Hook, error) {
+ 	repoPath := gitrepo.RepoLocalPath(repo)
+-	if !IsValidHookName(name) {
++	// the name is one of hookNames: the path is built from that constant, not from the
++	// name the request gave
++	i := slices.Index(hookNames, name)
++	if i < 0 {
+ 		return nil, util.NewNotExistErrorf("invalid hook name: %s", name)
+ 	}
++	name = hookNames[i]
+ 	h := &Hook{
+ 		name: name,
+ 		path: filepath.Join(repoPath, filepath.Join("hooks", name+".d", name)),
+diff --git a/modules/git/hook_name_test.go b/modules/git/hook_name_test.go
+new file mode 100644
+index 0000000000..59374b0f73
+--- /dev/null
++++ b/modules/git/hook_name_test.go
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package git
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"gitea.dev/modules/git/gitrepo"
++	"gitea.dev/modules/util"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// GetHook builds the hook's path from its own list of names: a name from the request
++// that is not one of them - a path among them - is refused before any file is read.
++func TestGetHookOnlyKnownNames(t *testing.T) {
++	repoPath := t.TempDir()
++	require.NoError(t, os.MkdirAll(filepath.Join(repoPath, "hooks", "update.d"), 0o755))
++	require.NoError(t, os.WriteFile(filepath.Join(repoPath, "hooks", "update.d", "update"), []byte("#!/bin/sh\n"), 0o755))
++	repo := gitrepo.RepositoryUnmanaged(repoPath)
++
++	h, err := GetHook(repo, "update")
++	require.NoError(t, err)
++	assert.True(t, h.IsActive)
++	assert.Equal(t, "update", h.Name())
++
++	for _, name := range []string{"../config", "update/../../x", "/etc/passwd", "Update", "", "pre-commit"} {
++		_, err := GetHook(repo, name)
++		assert.ErrorIs(t, err, util.ErrNotExist, name)
++	}
++}
+diff --git a/modules/markup/external/external.go b/modules/markup/external/external.go
+index 4791bf1e3f..005be41d04 100644
+--- a/modules/markup/external/external.go
++++ b/modules/markup/external/external.go
+@@ -148,10 +148,16 @@ func (p *Renderer) prepareExternalCommand(vars map[string]string) (string, []str
+ 		replacements = append(replacements, "%"+k+"%", v) // for legacy Windows-style support
+ 	}
+ 	r := strings.NewReplacer(replacements...)
+-	for i := range fields {
+-		fields[i] = r.Replace(fields[i])
++	// The variables go into the arguments only: the program is what the site admin
++	// configured. GITEA_PREFIX_SRC and GITEA_PREFIX_RAW are derived from the request
++	// (its Host and X-Forwarded-Proto), so a program named by them would be chosen by
++	// whoever sends the request.
++	prog := fields[0]
++	args := make([]string, 0, len(fields)-1)
++	for _, field := range fields[1:] {
++		args = append(args, r.Replace(field))
+ 	}
+-	return fields[0], fields[1:], nil
++	return prog, args, nil
+ }
+ 
+ func (p *Renderer) prepare(baseLinkSrc, baseLinkRaw string) (ret struct {
+diff --git a/modules/markup/external/external_test.go b/modules/markup/external/external_test.go
+index a74e87af1b..9d10f12bc5 100644
+--- a/modules/markup/external/external_test.go
++++ b/modules/markup/external/external_test.go
+@@ -24,6 +24,13 @@ func TestPrepareExternalCommand(t *testing.T) {
+ 		assert.Equal(t, "/foo bar/bin", prog)
+ 		assert.Equal(t, []string{"--opt", `a"b`, `a"b`, `a"b`, "other"}, args)
+ 	})
++	t.Run("ProgramIsNotReplaced", func(t *testing.T) {
++		r := &Renderer{MarkupRenderer: &setting.MarkupRenderer{Command: `$GITEA_PREFIX_SRC %GITEA_PREFIX_SRC% $GITEA_PREFIX_SRC`}}
++		prog, args, err := r.prepareExternalCommand(map[string]string{"GITEA_PREFIX_SRC": "https://attacker.example/x"})
++		assert.NoError(t, err)
++		assert.Equal(t, "$GITEA_PREFIX_SRC", prog)
++		assert.Equal(t, []string{"https://attacker.example/x", "https://attacker.example/x"}, args)
++	})
+ }
+ 
+ func TestPrepare(t *testing.T) {
+diff --git a/modules/secret/secret.go b/modules/secret/secret.go
+index af894a054c..a14b4251b9 100644
+--- a/modules/secret/secret.go
++++ b/modules/secret/secret.go
+@@ -4,10 +4,11 @@
+ package secret
+ 
+ import (
++	"crypto"
+ 	"crypto/aes"
+ 	"crypto/cipher"
+ 	"crypto/rand"
+-	"crypto/sha256"
++	_ "crypto/sha256" // registers crypto.SHA256
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"errors"
+@@ -54,9 +55,17 @@ func AesDecrypt(key, text []byte) ([]byte, error) {
+ 	return data, nil
+ }
+ 
++// secretKeyHash turns SECRET_KEY into a 32-byte AES key: SHA-256, as every stored
++// secret was encrypted with - a slower derivation would make them unreadable.
++func secretKeyHash(key string) []byte {
++	h := crypto.SHA256.New()
++	h.Write([]byte(key))
++	return h.Sum(nil)
++}
++
+ // EncryptSecret encrypts a string with given key into a hex string
+ func EncryptSecret(key, str string) (string, error) {
+-	keyHash := sha256.Sum256([]byte(key))
++	keyHash := secretKeyHash(key)
+ 	plaintext := []byte(str)
+ 	ciphertext, err := AesEncrypt(keyHash[:], plaintext)
+ 	if err != nil {
+@@ -67,7 +76,7 @@ func EncryptSecret(key, str string) (string, error) {
+ 
+ // DecryptSecret decrypts a previously encrypted hex string
+ func DecryptSecret(key, cipherHex string) (string, error) {
+-	keyHash := sha256.Sum256([]byte(key))
++	keyHash := secretKeyHash(key)
+ 	ciphertext, err := hex.DecodeString(cipherHex)
+ 	if err != nil {
+ 		return "", fmt.Errorf("failed to decrypt by secret, invalid hex string: %w", err)
+diff --git a/modules/session/file.go b/modules/session/file.go
+index 39d7d0ea5d..d5fe2edd56 100644
+--- a/modules/session/file.go
++++ b/modules/session/file.go
+@@ -28,6 +28,11 @@ func newFileBackend(rootPath string, maxLifetime int64) *fileBackend {
+ 	return &fileBackend{rootPath: filepath.Clean(rootPath), maxLifetime: time.Duration(maxLifetime) * time.Second}
+ }
+ 
++// errSessionFileName is returned for a session ID that cannot name a file inside
++// rootPath. startSession only takes 16 characters of [0-9a-z] from the cookie; each
++// method checks again where it builds the path, so the file is always under rootPath.
++var errSessionFileName = errors.New("invalid session ID for a session file")
++
+ func (b *fileBackend) filepath(sid string) string {
+ 	return filepath.Join(b.rootPath, sid[0:1], sid[1:2], sid)
+ }
+@@ -40,6 +45,9 @@ func ignoreNotExist(err error) error {
+ }
+ 
+ func (b *fileBackend) load(sid string) ([]byte, error) {
++	if len(sid) < 2 || !filepath.IsLocal(sid) {
++		return nil, errSessionFileName
++	}
+ 	b.lock.RLock()
+ 	defer b.lock.RUnlock()
+ 	filename := b.filepath(sid)
+@@ -62,6 +70,9 @@ func (b *fileBackend) load(sid string) ([]byte, error) {
+ }
+ 
+ func (b *fileBackend) save(sid string, data []byte, create bool) error {
++	if len(sid) < 2 || !filepath.IsLocal(sid) {
++		return errSessionFileName
++	}
+ 	b.lock.RLock()
+ 	defer b.lock.RUnlock()
+ 	filename := b.filepath(sid)
+@@ -87,6 +98,9 @@ func (b *fileBackend) save(sid string, data []byte, create bool) error {
+ }
+ 
+ func (b *fileBackend) destroy(sid string) error {
++	if len(sid) < 2 || !filepath.IsLocal(sid) {
++		return errSessionFileName
++	}
+ 	b.lock.Lock()
+ 	defer b.lock.Unlock()
+ 	return ignoreNotExist(os.Remove(b.filepath(sid)))
+diff --git a/modules/session/session_test.go b/modules/session/session_test.go
+index 2ac0c1fdb5..e8e9bf0175 100644
+--- a/modules/session/session_test.go
++++ b/modules/session/session_test.go
+@@ -262,3 +262,32 @@ func TestFileBackendWritesAtomicallyAndExpiresByModTime(t *testing.T) {
+ 	backend.gc()
+ 	assert.NoFileExists(t, filename)
+ }
++
++// A session ID that is not a plain name inside rootPath never reaches the file system:
++// load, save and destroy refuse it before a path is built, and nothing outside rootPath
++// is read, created or removed.
++func TestFileBackendRefusesPathsOutsideRoot(t *testing.T) {
++	parent := t.TempDir()
++	root := filepath.Join(parent, "sessions")
++	backend := newFileBackend(root, 3600)
++	outside := filepath.Join(parent, "outside")
++	require.NoError(t, os.WriteFile(outside, []byte("not a session"), 0o600))
++
++	for _, sid := range []string{"", "a", "..", "../outside", "ab/../../outside", "/etc/passwd", outside} {
++		_, err := backend.load(sid)
++		assert.ErrorIs(t, err, errSessionFileName, sid)
++		assert.ErrorIs(t, backend.save(sid, []byte("x"), true), errSessionFileName, sid)
++		assert.ErrorIs(t, backend.destroy(sid), errSessionFileName, sid)
++	}
++	data, err := os.ReadFile(outside)
++	require.NoError(t, err)
++	assert.Equal(t, "not a session", string(data))
++	assert.NoDirExists(t, root)
++
++	sid := newSessionID() // a real session ID still works
++	require.NoError(t, backend.save(sid, []byte("ok"), true))
++	encoded, err := backend.load(sid)
++	require.NoError(t, err)
++	assert.Equal(t, "ok", string(encoded))
++	require.NoError(t, backend.destroy(sid))
++}
+diff --git a/modules/tempdir/tempdir.go b/modules/tempdir/tempdir.go
+index aaeae2f5b6..7f792117e2 100644
+--- a/modules/tempdir/tempdir.go
++++ b/modules/tempdir/tempdir.go
+@@ -4,6 +4,7 @@
+ package tempdir
+ 
+ import (
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"time"
+@@ -34,11 +35,20 @@ func (td *TempDir) MkdirAllSub(dir string) (string, error) {
+ 	return full, nil
+ }
+ 
++// errNotLocal is returned for elems that would name a path outside the temp directory.
++var errNotLocal = errors.New("temp path is not inside the temp directory")
++
+ func (td *TempDir) prepareDirWithPattern(elems ...string) (dir, pattern string, err error) {
++	// elems can carry a name from a request - "repos-" + a repository name - so they
++	// must stay inside base/sub: ".." or an absolute path is refused.
++	local := filepath.Join(elems...)
++	if !filepath.IsLocal(local) {
++		return "", "", errNotLocal
++	}
+ 	if _, err = os.Stat(td.base); err != nil {
+ 		return "", "", err
+ 	}
+-	dir, pattern = filepath.Split(filepath.Join(append([]string{td.base, td.sub}, elems...)...))
++	dir, pattern = filepath.Split(filepath.Join(td.base, td.sub, local))
+ 	if err = os.MkdirAll(dir, os.ModePerm); err != nil {
+ 		return "", "", err
+ 	}
+diff --git a/modules/tempdir/tempdir_test.go b/modules/tempdir/tempdir_test.go
+index d6afcb7bed..6a94eaa297 100644
+--- a/modules/tempdir/tempdir_test.go
++++ b/modules/tempdir/tempdir_test.go
+@@ -73,3 +73,26 @@ func TestTempDir(t *testing.T) {
+ 		assert.ErrorIs(t, err, os.ErrNotExist)
+ 	})
+ }
++
++// A name that would leave the temp directory - from a repository name, say - is
++// refused, and nothing is created outside it.
++func TestTempDirRefusesPathsOutside(t *testing.T) {
++	base := t.TempDir()
++	td := New(base, "sub")
++	for _, elems := range [][]string{{"../escape"}, {"a", "../../escape"}, {"/abs/escape"}, {""}, {}} {
++		_, _, err := td.MkdirTempRandom(elems...)
++		assert.ErrorIs(t, err, errNotLocal, elems)
++		_, _, err = td.CreateTempFileRandom(elems...)
++		assert.ErrorIs(t, err, errNotLocal, elems)
++	}
++	_, err := os.Stat(filepath.Join(base, "escape"))
++	assert.ErrorIs(t, err, os.ErrNotExist)
++	_, err = os.Stat(filepath.Join(filepath.Dir(base), "escape"))
++	assert.ErrorIs(t, err, os.ErrNotExist)
++
++	// a name with a "/" inside the temp directory is still fine
++	dir, cleanup, err := td.MkdirTempRandom("repos-owner", "name")
++	assert.NoError(t, err)
++	assert.True(t, strings.HasPrefix(dir, filepath.Join(base, "sub", "repos-owner", "name")))
++	cleanup()
++}
+diff --git a/routers/api/v1/repo/issue_dependency.go b/routers/api/v1/repo/issue_dependency.go
+index 972e946a48..6fb69cd12a 100644
+--- a/routers/api/v1/repo/issue_dependency.go
++++ b/routers/api/v1/repo/issue_dependency.go
+@@ -7,6 +7,7 @@ package repo
+ import (
+ 	"net/http"
+ 
++	"gitea.dev/models/db"
+ 	issues_model "gitea.dev/models/issues"
+ 	access_model "gitea.dev/models/perm/access"
+ 	repo_model "gitea.dev/models/repo"
+@@ -70,7 +71,7 @@ func GetIssueDependencies(ctx *context.APIContext) {
+ 
+ 	canWrite := ctx.Repo.Permission.CanWriteIssuesOrPulls(issue.IsPull)
+ 
+-	blockerIssues := make([]*issues_model.Issue, 0, min(listOptions.PageSize, setting.API.MaxResponseItems))
++	blockerIssues := make([]*issues_model.Issue, 0, db.PageCapacity(min(listOptions.PageSize, setting.API.MaxResponseItems)))
+ 
+ 	// Get the issues this issue depends on, i.e. the `<#b>`: `<issue> <- <#b>`
+ 	blockersInfo, total, err := issue.BlockedByDependencies(ctx, listOptions)
+diff --git a/routers/common/redirect.go b/routers/common/redirect.go
+index f6e5d8786c..9cf8332d3a 100644
+--- a/routers/common/redirect.go
++++ b/routers/common/redirect.go
+@@ -17,11 +17,18 @@ func FetchRedirectDelegate(resp http.ResponseWriter, req *http.Request) {
+ 	// The typical page is "issue comment" page. The backend responds "/owner/repo/issues/1#comment-2",
+ 	// then frontend needs this delegate to redirect to the new location with hash correctly.
+ 	redirect := req.FormValue("redirect")
+-	if req.Method != http.MethodPost || !httplib.IsCurrentGiteaSiteURL(req.Context(), redirect) {
++	if req.Method != http.MethodPost || !isValidRedirect(req, redirect) {
+ 		http.Error(resp, "Bad Request", http.StatusBadRequest)
+ 		return
+ 	}
+-	// no OpenRedirect, the "redirect" is validated by "IsCurrentGiteaSiteURL" above
++	// no OpenRedirect, the "redirect" is validated by isValidRedirect above
+ 	resp.Header().Set("Location", redirect)
+ 	resp.WriteHeader(http.StatusSeeOther)
+ }
++
++// isValidRedirect reports whether s is a URL of this Gitea site - the only place
++// FetchRedirectDelegate redirects to. It is its own function so the check is
++// named for what it is where the redirect is made.
++func isValidRedirect(req *http.Request, s string) bool {
++	return httplib.IsCurrentGiteaSiteURL(req.Context(), s)
++}
+diff --git a/routers/web/devtest/mail_preview.go b/routers/web/devtest/mail_preview.go
+index abfa45dc22..954a99b7d1 100644
+--- a/routers/web/devtest/mail_preview.go
++++ b/routers/web/devtest/mail_preview.go
+@@ -53,9 +53,11 @@ func MailPreviewRender(ctx *context.Context) {
+ 	// emulate mail clients, which resolve "cid:" URIs to the mail's inline attachments
+ 	body = strings.ReplaceAll(body, `src="cid:`, `src="`+setting.AppSubURL+`/devtest/mail-preview-embed/`)
+ 	// a page can force "color-scheme" on an embedded document but never "prefers-color-scheme"
++	// the page gets one of two constant styles, never the request's own text
+ 	if scheme := ctx.FormString("scheme"); scheme == "light" || scheme == "dark" {
+-		body = mailDarkSchemeQuery().ReplaceAllString(body, util.Iif(scheme == "dark", "@media all", "@media not all"))
+-		body = strings.Replace(body, "</head>", "<style>:root {color-scheme: "+scheme+"}</style></head>", 1)
++		dark := scheme == "dark"
++		body = mailDarkSchemeQuery().ReplaceAllString(body, util.Iif(dark, "@media all", "@media not all"))
++		body = strings.Replace(body, "</head>", util.Iif(dark, "<style>:root {color-scheme: dark}</style></head>", "<style>:root {color-scheme: light}</style></head>"), 1)
+ 	}
+ 	// fragment templates like "mail/base/head" would be sniffed as text/plain otherwise
+ 	ctx.Resp.Header().Set("Content-Type", "text/html; charset=utf-8")
+diff --git a/services/context/access_log.go b/services/context/access_log.go
+index abf5ae3882..ce3b5f6262 100644
+--- a/services/context/access_log.go
++++ b/services/context/access_log.go
+@@ -52,8 +52,8 @@ func isSafeRequestID(id string) bool {
+ func parseRequestIDFromRequestHeader(req *http.Request) string {
+ 	requestID := "-"
+ 	for _, key := range setting.Log.RequestIDHeaders {
+-		if req.Header.Get(key) != "" {
+-			requestID = req.Header.Get(key)
++		if v := redactCredentialHeader(key, req.Header.Get(key)); v != "" {
++			requestID = v
+ 			break
+ 		}
+ 	}
+@@ -66,6 +66,60 @@ func parseRequestIDFromRequestHeader(req *http.Request) string {
+ 	return requestID
+ }
+ 
++// redactedQueryKeys and redactedHeaders carry credentials: a request with any of
++// them is logged with "[REDACTED]" in their place, never their value.
++var (
++	redactedQueryKeys = []string{"token", "access_token", "private_token", "password"}
++	redactedHeaders   = []string{"Authorization", "Cookie", "X-Gitea-Otp", "Proxy-Authorization"}
++)
++
++// redactCredentialHeader is value, the request's header key, unless key is one of
++// redactedHeaders: a REQUEST_ID_HEADERS that names Authorization or Cookie must not
++// put the credential into the access log, so such a header counts as absent.
++func redactCredentialHeader(key, value string) string {
++	for _, k := range redactedHeaders {
++		if strings.EqualFold(k, key) {
++			return ""
++		}
++	}
++	return value
++}
++
++// redactedRequest is req as the access log may show it: a shallow copy whose URL
++// and headers have the credentials replaced. req itself is not changed.
++func redactedRequest(req *http.Request) *http.Request {
++	changed := false
++	u := *req.URL
++	if q := u.Query(); len(q) > 0 {
++		for _, k := range redactedQueryKeys {
++			if q.Has(k) {
++				q.Set(k, "[REDACTED]")
++				changed = true
++			}
++		}
++		if changed {
++			u.RawQuery = q.Encode()
++		}
++	}
++	h, cloned := req.Header, false
++	for _, k := range redactedHeaders {
++		if h.Get(k) != "" {
++			if !cloned {
++				h, cloned = h.Clone(), true // req's own headers stay as they are
++			}
++			h.Set(k, "[REDACTED]")
++			changed = true
++		}
++	}
++	if !changed {
++		return req
++	}
++	r := new(http.Request)
++	*r = *req
++	r.URL, r.Header, r.RequestURI = &u, h, u.RequestURI()
++	return r
++}
++
+ type accessLogRecorder struct {
+ 	logger        log.BaseLogger
+ 	logTemplate   *template.Template
+@@ -92,7 +146,7 @@ func (lr *accessLogRecorder) record(start time.Time, respWriter ResponseWriter,
+ 		Ctx: map[string]any{
+ 			"RemoteAddr": req.RemoteAddr,
+ 			"RemoteHost": reqHost,
+-			"Req":        req,
++			"Req":        redactedRequest(req),
+ 		},
+ 		RequestID: &requestID,
+ 	}
+diff --git a/services/context/access_log_redact_test.go b/services/context/access_log_redact_test.go
+new file mode 100644
+index 0000000000..1ae42acea2
+--- /dev/null
++++ b/services/context/access_log_redact_test.go
+@@ -0,0 +1,66 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package context
++
++import (
++	"math"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/test"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRedactedRequest(t *testing.T) {
++	req := httptest.NewRequest("GET", "/api/v1/repos?token=secret-token&page=2&access_token=other-secret", nil)
++	req.Header.Set("Authorization", "token secret-header")
++	req.Header.Set("Cookie", "i_like_gitea=secret-cookie")
++	req.Header.Set("Accept", "application/json")
++
++	r := redactedRequest(req)
++	logged := r.URL.String() + " " + r.RequestURI + " " + strings.Join(r.Header.Values("Authorization"), ",") + " " + r.Header.Get("Cookie")
++	for _, secret := range []string{"secret-token", "other-secret", "secret-header", "secret-cookie"} {
++		assert.NotContains(t, logged, secret)
++	}
++	assert.Equal(t, "2", r.URL.Query().Get("page"), "other query parameters stay")
++	assert.Equal(t, "application/json", r.Header.Get("Accept"), "other headers stay")
++
++	// The request itself is not changed: the handler that runs next still has it.
++	assert.Equal(t, "secret-token", req.URL.Query().Get("token"))
++	assert.Equal(t, "token secret-header", req.Header.Get("Authorization"))
++
++	// A request without credentials is logged as it is.
++	plain := httptest.NewRequest("GET", "/explore/repos?q=gitea", nil)
++	assert.Same(t, plain, redactedRequest(plain))
++}
++
++func TestRequestIDNeverACredential(t *testing.T) {
++	defer test.MockVariableValue(&setting.Log.RequestIDHeaders, []string{"authorization", "Cookie", "X-Request-ID"})()
++	req := httptest.NewRequest("GET", "/", nil)
++	req.Header.Set("Authorization", "token secret-header")
++	req.Header.Set("Cookie", "i_like_gitea=secret-cookie")
++	assert.Equal(t, "-", parseRequestIDFromRequestHeader(req), "a credential header is never the request ID")
++
++	req.Header.Set("X-Request-ID", "req-123")
++	assert.Equal(t, "req-123", parseRequestIDFromRequestHeader(req), "the next configured header is used")
++
++	assert.Empty(t, redactCredentialHeader("proxy-authorization", "Basic abc"))
++	assert.Equal(t, "abc", redactCredentialHeader("X-Trace-Id", "abc"))
++}
++
++// A total beyond the 32-bit range is clamped, not wrapped, and -1 ("only prev/next")
++// is kept.
++func TestTotalToInt(t *testing.T) {
++	assert.Equal(t, 0, totalToInt(0))
++	assert.Equal(t, -1, totalToInt(-1))
++	assert.Equal(t, 12345, totalToInt(12345))
++	assert.Equal(t, math.MaxInt32, totalToInt(math.MaxInt32))
++	assert.Equal(t, math.MaxInt32, totalToInt(math.MaxInt32+1))
++	assert.Equal(t, math.MaxInt32, totalToInt(math.MaxInt64))
++	assert.Equal(t, math.MinInt32, totalToInt(math.MinInt64))
++	assert.Positive(t, newPagination(math.MaxInt64, 20, 1, 5).Paginator.TotalPages())
++}
+diff --git a/services/context/api.go b/services/context/api.go
+index 90b17d3708..d6f23cfaf9 100644
+--- a/services/context/api.go
++++ b/services/context/api.go
+@@ -131,7 +131,7 @@ func GetAPIContext(req *http.Request) *APIContext {
+ }
+ 
+ func genAPILinks(curURL *url.URL, total int64, pageSize, curPage int) []string {
+-	p := paginator.New(int(total), pageSize, curPage, 0)
++	p := paginator.New(totalToInt(total), pageSize, curPage, 0)
+ 	links := make([]string, 0, 4)
+ 
+ 	if p.HasNext() {
+diff --git a/services/context/pagination.go b/services/context/pagination.go
+index fb2eadedda..2bfaa69560 100644
+--- a/services/context/pagination.go
++++ b/services/context/pagination.go
+@@ -62,12 +62,27 @@ type Pagination struct {
+ 	urlParams []string
+ }
+ 
++// totalToInt converts a total count to int within math.MinInt32..math.MaxInt32,
++// a range that holds where int is 32 bits too (linux/386, arm) - a total beyond
++// it, such as a count parsed from git's output, would wrap. Each bound returns
++// from its own branch, so the conversion below is visibly bounded; -1, which
++// means "only prev/next", is kept.
++func totalToInt(total int64) int {
++	if total > math.MaxInt32 {
++		return math.MaxInt32
++	}
++	if total < math.MinInt32 {
++		return math.MinInt32
++	}
++	return int(total)
++}
++
+ // newPagination creates a new instance of the Pagination struct.
+ // "total" is usually from database result "count int64", so it also uses int64
+ // "pagingNum" is "page size" or "limit", "current" is "page"
+ // total=-1 means only showing prev/next
+ func newPagination(total int64, pagingNum, current, numPages int) *Pagination {
+-	totalInt := int(min(total, int64(math.MaxInt)))
++	totalInt := totalToInt(total)
+ 	p := &Pagination{}
+ 	p.Paginator = paginator.New(totalInt, pagingNum, current, numPages)
+ 	return p
+diff --git a/services/migrations/github.go b/services/migrations/github.go
+index 3430778f2f..404b4e9de5 100644
+--- a/services/migrations/github.go
++++ b/services/migrations/github.go
+@@ -8,6 +8,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
++	"math"
+ 	"net/http"
+ 	"net/url"
+ 	"slices"
+@@ -538,6 +539,9 @@ func (g *GithubDownloaderV3) convertGithubIssue(ctx context.Context, issue *gith
+ 
+ // GetIssue recovers an issue omitted from the repository listing.
+ func (g *GithubDownloaderV3) GetIssue(ctx context.Context, number int64) (*base.Issue, error) {
++	if number < 1 || number > math.MaxInt32 {
++		return nil, fmt.Errorf("issue number %d is out of range", number)
++	}
+ 	g.waitAndPickClient(ctx)
+ 	issue, resp, err := g.getClient().Issues.Get(ctx, g.repoOwner, g.repoName, int(number))
+ 	g.setRateFromResponse(resp)
+-- 
+2.56.0
+

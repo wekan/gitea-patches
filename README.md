@@ -38,6 +38,13 @@ the Finnish translation and its release workflows - both are here now.
   ([dist/all/migrate-timeout-a-day.md](dist/all/migrate-timeout-a-day.md)):
   `[git.timeout] MIGRATE` is 86400 s by default (it was 600), for large histories.
 
+- **Security hardening from code scanning**
+  ([dist/all/security-hardening.md](dist/all/security-hardening.md)): result
+  slices capped whatever page size a request asks for, `int64` to `int` bounded
+  on 32-bit platforms, credentials kept out of the access log, session, temp and
+  hook paths kept inside their directories, SQL values bound as arguments, and
+  the fast hashes that are not password storage named as such.
+
 Code patches are in `dist/all/`; see [the patch format](docs/Design/Patch-format.md).
 
 ## Making a release
