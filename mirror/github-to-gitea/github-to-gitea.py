@@ -470,10 +470,28 @@ def set_releases_all(items):
     CFG.set("releases_all", "list", "\n" + "\n".join(items) if items else "")
 
 
+EXCLUDE_FILE = os.path.join(HERE, "github-to-gitea.exclude.txt")
+
+
+def file_excludes(path=None):
+    """The repositories in github-to-gitea.exclude.txt beside the .ini: one
+    owner/name a line, '#' comments. Omi adds and removes lines there (its
+    SYNC_EXCLUDE_FILE) without touching the .ini."""
+    path = path or EXCLUDE_FILE
+    try:
+        with open(path, encoding="utf-8") as f:
+            return gitea_attachments.parse_exclude_file(f.read())
+    except FileNotFoundError:
+        return []
+
+
 def excludes():
     """Repositories left out of what an organization or user expands to, e.g.
-    microsoft/verybig while microsoft is a source."""
-    return gitea_attachments.parse_excludes(CFG.get("sources", "exclude", fallback=""))
+    microsoft/verybig while microsoft is a source: [sources] exclude, and the
+    exclude file."""
+    own = gitea_attachments.parse_excludes(CFG.get("sources", "exclude", fallback=""))
+    seen = {e.lower() for e in own}
+    return own + [e for e in file_excludes() if e.lower() not in seen]
 
 
 def set_excludes(items):
@@ -2328,11 +2346,14 @@ def menu_sources():
             print(f" {i:2}) {s}  ({what})")
         if not items:
             print("    (none)")
-        left_out = excludes()
+        left_out = gitea_attachments.parse_excludes(CFG.get("sources", "exclude", fallback=""))
+        in_file = [e for e in file_excludes() if e.lower() not in {x.lower() for x in left_out}]
         print("\n  Excluded (left out of an organization or user):")
         for i, s in enumerate(left_out, 1):
             print(f" {i:2}) {s}")
-        if not left_out:
+        for s in in_file:
+            print(f"     {s}  (in {os.path.basename(EXCLUDE_FILE)}; Omi's Include again removes it)")
+        if not left_out and not in_file:
             print("    (none)")
         print("  a) Add   r) Remove   x) Exclude a repository   i) Include an excluded one again")
         print("  s) Show what would be imported   0) Back")
@@ -2358,7 +2379,7 @@ def menu_sources():
         elif c == "x":
             v = ask("Repository to leave out, as owner/name (e.g. microsoft/verybig)")
             v = gitea_attachments.normalize_scope(v.replace("https://github.com/", ""))
-            if v and "/" in v and v.lower() not in [x.lower() for x in left_out]:
+            if v and "/" in v and v.lower() not in [x.lower() for x in left_out + in_file]:
                 set_excludes(left_out + [v])
                 save_config()
             elif v:

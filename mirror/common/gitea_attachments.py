@@ -82,6 +82,13 @@ def parse_excludes(text):
     return [s.strip() for s in (text or "").replace(",", "\n").split("\n") if s.strip()]
 
 
+def parse_exclude_file(text):
+    """The exclude file (github-to-gitea.exclude.txt, beside the .ini, shared with
+    Omi): the same entries as [sources] exclude, one a line or comma separated,
+    with everything from '#' to the end of a line a comment."""
+    return parse_excludes("\n".join(line.split("#", 1)[0] for line in (text or "").splitlines()))
+
+
 def apply_excludes(source, names, excludes):
     """(kept, left out). A source that names one repository is never filtered: asking
     for it by name is asking for it."""

@@ -15,3 +15,6 @@ mirror/github-to-gitea/tmp/
 mirror/github-to-gitea/github-to-gitea-backup/
 # Logs go to WeKan's .tools/log/mirror/; a log.txt anywhere here is never committed.
 *log.txt
+# The repositories this machine no longer syncs (Omi adds and removes them).
+mirror/github-to-gitea/github-to-gitea.exclude.txt
+mirror/github-to-gitea/github-to-gitea.exclude.txt.tmp

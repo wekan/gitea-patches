@@ -53,6 +53,7 @@ case "$command" in
     python3 -I tests/githubToGiteaApiHost.test.py
     python3 -I tests/screenLog.test.py
     python3 -I tests/giteaAttachments.test.py
+    python3 -I tests/githubToGiteaExcludeFile.test.py
     python3 -I tests/giteaBackup.test.py
     python3 -I tests/githubBackup.test.py
     python3 -I tests/changelogShort.test.py ;;
