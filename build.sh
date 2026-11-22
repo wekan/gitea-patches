@@ -7,6 +7,7 @@
 #   ./build.sh test               the offline tests
 #   ./build.sh release-all [ref]  run Release All on GitHub (gh workflow run)
 #   ./build.sh release-all-missing [tag]
+#   ./build.sh translations [ref] the newest Gitea translations from upstream, merged, into dist/translations/gitea-locale
 set -euo pipefail
 root="$(cd "$(dirname "$0")" && pwd)"
 cd "$root"
@@ -17,12 +18,13 @@ if [ -z "$command" ]; then
 3) Run the tests
 4) Release All (GitHub Actions)
 5) Release All Missing (GitHub Actions)
+6) Download the newest Gitea translations from upstream
 0) Exit
 Selection: '
   read -r choice
   case "$choice" in
     1) command=source;; 2) command=build;; 3) command=test;;
-    4) command=release-all;; 5) command=release-all-missing;; 0) exit 0;;
+    4) command=release-all;; 5) command=release-all-missing;; 6) command=translations;; 0) exit 0;;
     *) echo 'Invalid selection' >&2; exit 2;;
   esac
 else
@@ -37,6 +39,7 @@ case "$command" in
     exec ./build-gitea.sh ;;
   test)
     python3 -I tests/translations.test.py
+    python3 -I tests/updateTranslations.test.py
     bash tests/apply-patches.sh
     bash tests/source-zips.sh
     python3 -I tests/mirror.test.py
@@ -53,9 +56,11 @@ case "$command" in
     python3 -I tests/giteaBackup.test.py
     python3 -I tests/githubBackup.test.py
     python3 -I tests/changelogShort.test.py ;;
+  translations)
+    exec bash releases/update-translations.sh "${1:-}" ;;
   release-all)
     exec gh workflow run release-all.yml -R wekan/gitea-patches ${1:+-f ref="$1"} ;;
   release-all-missing)
     exec gh workflow run release-all-missing.yml -R wekan/gitea-patches ${1:+-f tag="$1"} ;;
-  *) echo "Usage: $0 [source [ref]|build|test|release-all [ref]|release-all-missing [tag]]" >&2; exit 2 ;;
+  *) echo "Usage: $0 [source [ref]|build|test|release-all [ref]|release-all-missing [tag]|translations [ref]]" >&2; exit 2 ;;
 esac
