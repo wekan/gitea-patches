@@ -21,8 +21,9 @@ repository's changes applied as **git commits**, and released with its source as
 upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
 SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, an organization or user can be **backed up, deleted and
-restored** - or updated **straight from GitHub** - github-to-gitea recognises
+clone time limit, an organization or user has **one backup, updated in
+place** from Gitea or **straight from GitHub**, and can be deleted and
+restored, **all of Gitea can move into backups**, github-to-gitea recognises
 **GitHub's API by its parsed host**, and Gitea carries the **security
 hardening** code scanning found.
 
@@ -129,6 +130,38 @@ from its old bundle, so only new objects are downloaded. Files linked from
 issue and comment bodies on GitHub are saved too, and the token goes only to
 GitHub's own addresses. The format stays FORMAT 1 with `source = github` in
 `meta`. `tests/githubBackup.test.py` runs it against a fake GitHub.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/966a1c133a888cff1a6e8e9c9efd71fe582b7c97">One backup an owner, updated in place; dated backups combined into it; old data; migrate all Gitea</a>. Thanks to xet7.</summary>
+
+A backup of an organization or user is now one directory with no date in it,
+`<backup_dir>/<name>/<name>.db` and `<name>.zip`, and every run - from Gitea
+or straight from GitHub - updates it in place with only what is new or
+changed: rows by primary key, newest winning, and rows deleted at the source
+kept; files downloaded only when new or changed; bundles fetched only when
+refs changed, from a mirror seeded from the old bundle. The zip is written
+again into `<name>.zip.tmp` with every kept entry copied as it is and the
+replaced ones left out, so it never grows with stale copies (appended to
+instead when the disk has no room for the copy), the `.db` in a copy, both
+renamed into place behind a commit marker under `.backup.lock` - the lock
+Omi takes too - so a run that breaks off leaves the previous backup as it
+was. **Combine dated backups into one (saves disk space)** - Backups item 8
+and `--combine-backups NAME|all [--dry-run]`, offline with no token -
+merges every dated backup of older versions oldest to newest, merges
+bundles that differ, verifies that every row key and zip path of every one
+is there and the zip tests whole, and only then deletes them and says how
+much was freed; backup runs and the backups list do it first. Every row's
+`seen` marks what the newest run no longer saw at the source: item 9 and
+`--list-old-only` list it, item 10 and `--delete-old-only` delete it when the
+owner's name is typed. **Migrate all Gitea to backups** - item 11 and
+`--migrate-all-gitea [--dry-run] [--continue-on-error]` - moves every
+repository, smallest first, into its owner's backup, verifies it against
+Gitea (counts, file hashes, `git bundle verify`) and only then deletes it
+from Gitea, skipping what does not fit on the disk and resuming where it
+left off. `tests/giteaBackup.test.py` and `tests/githubBackup.test.py` cover
+it against a fake Gitea and GitHub, and the disposable test Gitea.
 
 </details>
 

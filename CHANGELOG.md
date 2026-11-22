@@ -13,8 +13,9 @@ repository's changes applied as **git commits**, and released with its source as
 upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
 SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, an organization or user can be **backed up, deleted and
-restored** - or updated **straight from GitHub** - github-to-gitea recognises
+clone time limit, an organization or user has **one backup, updated in
+place** from Gitea or **straight from GitHub**, and can be deleted and
+restored, **all of Gitea can move into backups**, github-to-gitea recognises
 **GitHub's API by its parsed host**, and Gitea carries the **security
 hardening** code scanning found.
 

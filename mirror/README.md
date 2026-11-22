@@ -240,12 +240,17 @@ works on one organization or user of the local Gitea:
 
 | Item | What it does |
 |------|--------------|
-| Back up | every repository, issue, pull request, comment, label, milestone, release, wiki, team, collaborator and file of `wekan`, into `<backup_dir>/wekan/YYYY-MM-DD_HH-MM-SS/wekan.db` and `wekan.zip` |
-| Delete | removes the organization or user from Gitea completely - every repository with its issues, releases, wiki and files, its packages, and then the owner itself - after listing what goes and only when its name is typed; offers a backup first when there is none |
-| Restore into Gitea | the backup into an organization or user (the same or another name; a missing one is created): the same issue and pull request numbers, authors kept with an admin token (Gitea's `Sudo`), merged pull requests merged, files uploaded again with their links in the text updated, teams and collaborators. A repository Gitea already has is left as it is |
-| Restore into WeKan | one WeKan import `.zip` a repository (`wekan.json` and `attachments/`), cards in Open, Closed and Merged with their comments, labels and files - imported in WeKan from All Boards / Import, or at once with a WeKan address and sign-in |
-| Backup directory | the setting `backup_dir`: `github-to-gitea-backup` beside the script by default, or any path, another disk too |
-| Update a backup straight from GitHub (no Gitea) | a NEW backup of a GitHub organization or user: the newest backup of it made from GitHub, with what is new or changed on GitHub since - or a whole one when there is none. Needs no Gitea and no Gitea token; leaves out the Sources excludes and any more repositories it is given. Also `./github-to-gitea.py --backup-from-github wekan [--exclude wekan/big]` |
+| 1) Back up | every repository, issue, pull request, comment, label, milestone, release, wiki, team, collaborator and file of `wekan`, into its one backup `<backup_dir>/wekan/wekan.db` and `wekan.zip` - made the first time, then **updated in place** with only what is new or changed |
+| 2) Delete | removes the organization or user from Gitea completely - every repository with its issues, releases, wiki and files, its packages, and then the owner itself - after listing what goes and only when its name is typed; offers a backup first when there is none |
+| 3) Restore into Gitea | the backup into an organization or user (the same or another name; a missing one is created): the same issue and pull request numbers, authors kept with an admin token (Gitea's `Sudo`), merged pull requests merged, files uploaded again with their links in the text updated, teams and collaborators. A repository Gitea already has is left as it is |
+| 4) Restore into WeKan | one WeKan import `.zip` a repository (`wekan.json` and `attachments/`), cards in Open, Closed and Merged with their comments, labels and files - imported in WeKan from All Boards / Import, or at once with a WeKan address and sign-in |
+| 5) List the backups | one line an owner: when its newest run began, its size, how many runs, from Gitea and/or GitHub |
+| 6) Backup directory | the setting `backup_dir`: `github-to-gitea-backup` beside the script by default, or any path, another disk too |
+| 7) Update a backup straight from GitHub (no Gitea) | the same one backup, updated in place from GitHub: what is new or changed on GitHub - or a whole one when there is none. Needs no Gitea and no Gitea token; leaves out the Sources excludes and any more repositories it is given. Also `./github-to-gitea.py --backup-from-github wekan [--exclude wekan/big]` |
+| 8) Combine dated backups into one (saves disk space) | the dated backups older versions wrote, combined into the one backup, verified, and deleted - one owner or all, a dry run first. Needs no Gitea, no GitHub and no token. Also `--combine-backups wekan\|all [--dry-run] [--delete-partial]` |
+| 9) What older backups had that the newest does not | the old data, per repository: issues, pull requests, comments, releases, labels, milestones, files, with counts and the items. Also `--list-old-only wekan` |
+| 10) Delete data that does not exist in the newest backup | that list and the space it frees, then - only when the owner's name is typed - the rows and their zip entries removed, the zip written again without them. Also `--delete-old-only wekan [--dry-run] [--confirm wekan]` |
+| 11) Migrate all Gitea to backups | see below. Also `--migrate-all-gitea [--dry-run] [--continue-on-error]` |
 
 `wekan.db` is SQLite and keeps Gitea's own JSON of every record (its tables are
 listed at the top of `gitea_backup.py`). `wekan.zip` holds the files in folders -
@@ -253,36 +258,142 @@ listed at the top of `gitea_backup.py`). `wekan.zip` holds the files in folders 
 `<repo>/issues/<number>/<id>-<file>`, `<repo>/comments/<number>/<comment>/<id>-<file>`
 - each **stored, not compressed** (they are compressed already), so a program such
 as Omi can list, show and replace one without unpacking the archive. The `.db`
-has each file's size and SHA-256. A backup is written as `<stamp>.partial` and
-renamed when it is whole. Not in a backup: Git LFS objects, Actions runs and
-secrets, and code review comments on pull request lines.
+has each file's size and SHA-256. Not in a backup: Git LFS objects, Actions runs
+and secrets, packages, and code review comments on pull request lines.
+
+### One backup an owner, updated in place
+
+```
+<backup_dir>/wekan/wekan.db
+<backup_dir>/wekan/wekan.zip
+```
+
+There is no date in the path: every run - from Gitea (item 1) or from GitHub
+(item 7) - updates that backup, and adds only what is new or changed:
+
+- **rows** are written by their primary key; the newest wins;
+- **what was deleted at the source is kept**: a backup keeps the issue, comment,
+  release or repository that was deleted in Gitea or on GitHub after it was backed
+  up. Each row's `seen` is the run that last saw it at the source and `meta runs`
+  the newest run, so `seen < runs` is **old data** - items 9 and 10;
+- **files** are downloaded only when they are new or changed (a Gitea attachment
+  by its id, size and uuid, a GitHub release file by its id, size and
+  `updated_at`; a downloaded one that has the same SHA-256 as the old copy is not
+  written again);
+- **git and wiki bundles** are made again only when the branches, tags or pull
+  request heads changed, from a mirror seeded from the old bundle - only the new
+  objects come over the network - and a branch deleted at the source stays in
+  the bundle;
+- **the zip never grows with stale copies**: it is written again into
+  `wekan.zip.tmp` - every kept entry copied as it is, from this disk, the new
+  ones added, the ones they replace left out - and renamed over `wekan.zip`. A
+  run in which nothing in the zip changed does not write it at all. When the disk
+  has no room for that copy, the new entries are appended to the zip instead
+  (its old length in `wekan.zip.append` until they are whole), and a later run
+  with room writes it again;
+- the `.db` is updated in a copy, `wekan.db.tmp`. Both are synced and renamed
+  into place behind the marker `.backup.commit`: **a run that breaks off leaves
+  the previous backup as it was**, and the next run removes what it left - or
+  finishes renaming, when it had got that far;
+- **one run at a time**: `<backup_dir>/wekan/.backup.lock` (a line `<pid> <host>
+  <program> <time>`) is taken by every run and by Omi's edits; a second run
+  refuses. A lock whose process is gone on this host is taken over. A `.omi-save`
+  journal of an Omi save that broke off is rolled back first, as Omi does it.
+
+The `meta` table says `created` (the first run), `updated` (when the newest run
+began), `runs`, `sources` (`gitea`, `github`), `source` (the newest run's),
+`kept` (what is kept), `merged` (the dated backups combined into it) and
+`deleted_old_only` (the last deletion of old data).
+
+### Combining the dated backups of older versions
+
+Older versions wrote a new directory each run,
+`<backup_dir>/wekan/YYYY-MM-DD_HH-MM-SS/wekan.db` and `wekan.zip`, each with
+everything - so ten runs took ten times the space. Every backup run, the backups
+list (items 3, 4 and 5) and opening a backup combine them first; item 8 and
+`--combine-backups` do it on their own, offline, at once:
+
+1. every whole dated backup (a `.partial` one broke off and is never merged;
+   item 8 and `--delete-partial` delete it) is merged, **oldest to newest**, into
+   `wekan/wekan.db` and `wekan.zip`, with the one backup when there is one: the
+   newest value wins for the same key and the newest copy for the same zip path,
+   and **every row and file that only an older one has is kept** (as old data).
+   Git bundles that differ are merged into one bundle with every ref of all of
+   them;
+2. the result is **verified**: every row key of every dated `.db` is in the
+   combined one, every zip path of every dated `.zip` is in the combined zip at
+   the newest copy, and the combined zip tests whole (`zipfile.testzip`);
+3. only then are the dated directories deleted, and the space freed is shown.
+
+A damaged dated backup (a zip entry whose CRC does not match, a `.db` that does
+not read) stops it before anything is written, and nothing is deleted.
+`--dry-run` reads and tests everything and says what would be freed.
+
+### Migrate all Gitea to backups
+
+Item 11 and `--migrate-all-gitea` move **all** of the local Gitea into backups
+and free its disk as they go: **one repository at a time, smallest first**, so
+what each deletion frees makes room for the next. For each repository:
+
+1. the free space of `backup_dir`'s file system is compared with what its backup
+   needs (git twice - the mirror and its bundle - plus its files, 10 % and
+   100 MB more); one that does not fit now is skipped and named at the end;
+2. it is backed up into its owner's one backup (the other repositories' rows stay
+   as current as they were);
+3. it is **verified** against Gitea: the counts of its issues, pull requests,
+   comments, releases, labels, milestones and files equal Gitea's, every file's
+   bytes match their CRC and SHA-256, and its git and wiki bundles pass
+   `git bundle verify` with every branch, tag and pull request head at Gitea's
+   commit;
+4. only then is it deleted from Gitea, with its packages (packages are not in
+   backups), and a line says the backup's growth, the space freed and the space
+   free now.
+
+After an owner's last repository, its own data (teams, members, labels, avatar)
+is backed up and the organization or user is deleted - never the token's own
+user, which is backed up and left. A repository whose verification fails is never
+deleted; the run stops there (`--continue-on-error` goes on). Excluded
+repositories (Sources excludes) stay, and so does their owner. Run it again and it
+goes on: what is gone from Gitea is done, a repository backed up but not yet
+deleted is updated, verified and deleted. It needs an admin token, asks to type
+`migrate all gitea` and then the Gitea address, and warns when `backup_dir` is not
+on the disk of Gitea's data (setting `bare_repo`): then deleting from Gitea frees
+nothing for the backups.
+
+**A 1 TB disk with 11 GB free**, all of it Gitea: point `backup_dir` to a
+directory on the same disk (Settings, or item 6), run `--migrate-all-gitea
+--dry-run` and read the order, the sizes and what would not fit, then run the
+migration. The small repositories go first, each freeing what it took; the disk
+turns from a Gitea disk into a backups disk. Then open the backups with Omi
+(`BACKUPS_DIR` in Omi's `settings.txt`).
 
 **Straight from GitHub** (`mirror/common/github_backup.py`) the backup has the
 same tables and folders, each row with GitHub's own JSON, and `meta` has
-`source = github`, `based_on` (the backup it was brought up to date from) and
-`missing_files`. The old backup is only read; the new one is a new
-`<stamp>.partial`, renamed when whole. What is downloaded again:
+`source = github`, `github_updated` (when the last run from GitHub began) and
+`missing_files`. What is downloaded again:
 
 - repositories, labels, milestones, collaborators, teams and members are listed
   again (topics are in GitHub's repository JSON);
-- issues, pull requests and comments only when updated since the old backup
-  began (GitHub's `since`), pull request details only for new and changed pull
-  requests; everything else is copied from the old backup;
-- release files only when the old backup lacks that file id with the same size
-  and `updated_at` - the others are copied from the old `.zip` as they are, with
-  no download; a release GitHub no longer has is kept, so is a repository;
+- issues, pull requests and comments only when updated since the last run from
+  GitHub began (GitHub's `since`), pull request details only for new and changed
+  pull requests; everything else is kept as it is, and counts as still at GitHub;
+- release files only when the backup lacks that file id with the same size and
+  `updated_at` - the others are kept as they are, with no download; a release
+  GitHub no longer has is kept, so is a repository - as old data;
 - files that issue and comment bodies link to on GitHub
   (`github.com/user-attachments/...`, `github.com/<owner>/<repo>/files|assets/...`,
   `user-images.githubusercontent.com`) into `issues/` and `comments/`, with their
   SHA-256; a link that cannot be fetched is reported and tried again next time;
 - git and the wiki: when GitHub's branches, tags and pull request heads are the
-  old bundle's, the bundle is copied; otherwise a mirror is seeded from the old
+  old bundle's, the bundle is kept; otherwise a mirror is seeded from the old
   bundle and fetched from GitHub, so only the new objects come over the network.
 
-The GitHub token goes only to `api.github.com` and `github.com` over https: a
-redirect to another host - GitHub sends files to signed storage addresses -
-drops it, and other hosts never get it. Each repository shows its new and
-changed counts, and the end a summary with the bytes downloaded and copied.
+A backup made from Gitea and one made from GitHub are the same backup: either
+kind of run updates it. The GitHub token goes only to `api.github.com` and
+`github.com` over https: a redirect to another host - GitHub sends files to
+signed storage addresses - drops it, and other hosts never get it. Each
+repository shows its new and changed counts, and the end a summary with the bytes
+downloaded and kept and the zip's new entries.
 
 ## Working with WeKan's releases/mirror.sh
 
@@ -328,9 +439,11 @@ python3 -I tests/giteaBackup.test.py
 python3 -I tests/githubBackup.test.py
 ```
 
-`tests/giteaBackup.test.py` also runs the whole round trip - back up, delete,
-restore, WeKan - against a disposable Gitea given by `GITEA_TEST_URL`,
-`GITEA_TEST_TOKEN` (admin) and `GITEA_TEST_USER` (an ordinary user). Never point
-it at a Gitea in use: it creates and deletes the organization `backuptestorg`.
+`tests/giteaBackup.test.py` runs combining, in-place updates, old data and the
+migration against a fake Gitea always, and the whole round trip - back up, update
+in place, old data, delete, restore, WeKan, migrate - against a disposable Gitea
+given by `GITEA_TEST_URL`, `GITEA_TEST_TOKEN` (admin) and `GITEA_TEST_USER` (an
+ordinary user). Never point it at a Gitea in use: it creates and deletes the
+organizations `backuptestorg` and `migratetestorg`.
 
 A fake Gitea, GitLab and SourceForge and local git repositories - no network.
