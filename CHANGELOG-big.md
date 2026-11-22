@@ -404,6 +404,22 @@ the menu and the negative cases.
 
 </details>
 
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/1748aa59695f4375b61e00161c67100b9d9082bd">github-to-gitea leaves out the repositories in github-to-gitea.exclude.txt, shared with Omi</a>. Thanks to xet7.</summary>
+
+`excludes()` adds the repositories in `github-to-gitea.exclude.txt`, beside
+`github-to-gitea.ini`, to `[sources] exclude`, so the sync and the backups
+leave them out of what an organization or user expands to. One owner/name a
+line, or comma separated, with `#` comments, read with
+`gitea_attachments.parse_exclude_file` - the rule Omi uses too: Omi's "Do not
+sync this repository any more" adds a line there and "Include again" removes
+it, without touching the .ini. The file is this machine's and not committed.
+`tests/githubToGiteaExcludeFile.test.py` covers the rule, the merge with the
+.ini's list, a source that names the repository itself, and that the .ini is
+not written.
+
+</details>
+
 and fixes the following bugs:
 
 **Mirroring** - github-to-gitea's errors in runs of 942 and 11,761 repositories.
