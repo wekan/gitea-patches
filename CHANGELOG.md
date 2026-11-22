@@ -8,15 +8,13 @@ make changes there.
 # Upcoming gitea-patches release
 
 Gitea is built from **upstream go-gitea/gitea** with this
-repository's changes applied as **git commits**, and released with its source as
-**two zips** - with and without git history - and binaries for **every platform
-upstream releases**, built from the zip without history. The web UI is
-**completely in Finnish**, the local Gitea is **mirrored on to GitLab and
-SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, an organization or user has **one backup, updated in
-place** from Gitea or **straight from GitHub**, and can be deleted and
-restored, **all of Gitea can move into backups**, github-to-gitea recognises
-**GitHub's API by its parsed host**, and Gitea carries the **security
-hardening** code scanning found.
+repository's changes as **git commits**, released as **two source zips** and
+binaries for **every platform upstream releases**. The web UI is **completely
+in Finnish**, with the **newest upstream translations** kept for the WeKan
+prototypes, the local Gitea is **mirrored on to GitLab and SourceForge**,
+**long migrations** no longer break off, an organization or user has **one
+backup, updated in place** from Gitea or **straight from GitHub**, which can be
+deleted and restored, **all of Gitea can move into backups**, and Gitea carries
+the **security hardening** code scanning found.
 
 [All changes so far](CHANGELOG-big.md#upcoming-gitea-patches-release)

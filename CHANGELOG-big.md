@@ -16,16 +16,14 @@ the source as `gitea-patches-source-with-history.zip` and
 # Upcoming gitea-patches release
 
 **In short:** Gitea is built from **upstream go-gitea/gitea** with this
-repository's changes applied as **git commits**, and released with its source as
-**two zips** - with and without git history - and binaries for **every platform
-upstream releases**, built from the zip without history. The web UI is
-**completely in Finnish**, the local Gitea is **mirrored on to GitLab and
-SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, an organization or user has **one backup, updated in
-place** from Gitea or **straight from GitHub**, and can be deleted and
-restored, **all of Gitea can move into backups**, github-to-gitea recognises
-**GitHub's API by its parsed host**, and Gitea carries the **security
-hardening** code scanning found.
+repository's changes as **git commits**, released as **two source zips** and
+binaries for **every platform upstream releases**. The web UI is **completely
+in Finnish**, with the **newest upstream translations** kept for the WeKan
+prototypes, the local Gitea is **mirrored on to GitLab and SourceForge**,
+**long migrations** no longer break off, an organization or user has **one
+backup, updated in place** from Gitea or **straight from GitHub**, which can be
+deleted and restored, **all of Gitea can move into backups**, and Gitea carries
+the **security hardening** code scanning found.
 
 This release fixes the following SECURITY ISSUES found by GitHub CodeQL code scanning:
 
@@ -311,6 +309,20 @@ commits later. `releases/apply-translations.py` merges by key, keeps
 upstream's string for every key this repository does not have, prefers
 upstream's own translation when the English has changed since, and never uses
 a string whose `%`-verbs or HTML tags differ from the English.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/99c915722f795b568042e88ef4ea02071b21e07b">Download the newest Gitea translations from upstream, with this repository's merged in</a>. Thanks to xet7.</summary>
+
+Menu 6, `./build.sh translations [ref]`, fetches only `options/locale/` of
+go-gitea/gitea, merges this repository's translations into it by key with the
+same `apply-translations.py` a Gitea build uses, and keeps the result in
+`dist/translations/gitea-locale/` with `SOURCE` naming the upstream commit.
+WeKan's version control prototypes - Omi, Wami, github-to-gitea - copy their
+Gitea translations from there, because only this repository has the complete
+Finnish. A failed update leaves the previous files as they were;
+`tests/updateTranslations.test.py` plays upstream with a local repository.
 
 </details>
 
