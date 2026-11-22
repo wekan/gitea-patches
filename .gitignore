@@ -11,5 +11,7 @@ mirror/gitea-to-*/log/
 mirror/gitea-to-*/work/
 # github-to-gitea: its git cache of pull request heads pushed to Gitea.
 mirror/github-to-gitea/tmp/
+# Backups of Gitea organizations and users (setting backup_dir), and their restore copies.
+mirror/github-to-gitea/github-to-gitea-backup/
 # Logs go to WeKan's .tools/log/mirror/; a log.txt anywhere here is never committed.
 *log.txt

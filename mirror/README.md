@@ -233,6 +233,29 @@ and asks `has_access?perm=admin` whether the token may administer the project, w
 releases, so release files go over sftp to `frs.sourceforge.net`, the way SourceForge
 documents it, and git over SSH to `git.code.sf.net`.
 
+## Backups of an organization or user
+
+github-to-gitea's menu item **11) Backups** (`mirror/common/gitea_backup.py`)
+works on one organization or user of the local Gitea:
+
+| Item | What it does |
+|------|--------------|
+| Back up | every repository, issue, pull request, comment, label, milestone, release, wiki, team, collaborator and file of `wekan`, into `<backup_dir>/wekan/YYYY-MM-DD_HH-MM-SS/wekan.db` and `wekan.zip` |
+| Delete | removes the organization or user from Gitea completely - every repository with its issues, releases, wiki and files, its packages, and then the owner itself - after listing what goes and only when its name is typed; offers a backup first when there is none |
+| Restore into Gitea | the backup into an organization or user (the same or another name; a missing one is created): the same issue and pull request numbers, authors kept with an admin token (Gitea's `Sudo`), merged pull requests merged, files uploaded again with their links in the text updated, teams and collaborators. A repository Gitea already has is left as it is |
+| Restore into WeKan | one WeKan import `.zip` a repository (`wekan.json` and `attachments/`), cards in Open, Closed and Merged with their comments, labels and files - imported in WeKan from All Boards / Import, or at once with a WeKan address and sign-in |
+| Backup directory | the setting `backup_dir`: `github-to-gitea-backup` beside the script by default, or any path, another disk too |
+
+`wekan.db` is SQLite and keeps Gitea's own JSON of every record (its tables are
+listed at the top of `gitea_backup.py`). `wekan.zip` holds the files in folders -
+`<repo>/git.bundle`, `<repo>/wiki.bundle`, `<repo>/releases/<tag>/<file>`,
+`<repo>/issues/<number>/<id>-<file>`, `<repo>/comments/<number>/<comment>/<id>-<file>`
+- each **stored, not compressed** (they are compressed already), so a program such
+as Omi can list, show and replace one without unpacking the archive. The `.db`
+has each file's size and SHA-256. A backup is written as `<stamp>.partial` and
+renamed when it is whole. Not in a backup: Git LFS objects, Actions runs and
+secrets, and code review comments on pull request lines.
+
 ## Working with WeKan's releases/mirror.sh
 
 Every copied issue, comment and release carries `<!-- wekan-mirror:URL -->`, the marker
@@ -272,6 +295,13 @@ python3 -I tests/githubToGiteaWiki.test.py
 python3 -I tests/githubToGiteaFork.test.py
 python3 -I tests/githubToGiteaRunErrors.test.py
 python3 -I tests/screenLog.test.py
+python3 -I tests/giteaAttachments.test.py
+python3 -I tests/giteaBackup.test.py
 ```
+
+`tests/giteaBackup.test.py` also runs the whole round trip - back up, delete,
+restore, WeKan - against a disposable Gitea given by `GITEA_TEST_URL`,
+`GITEA_TEST_TOKEN` (admin) and `GITEA_TEST_USER` (an ordinary user). Never point
+it at a Gitea in use: it creates and deletes the organization `backuptestorg`.
 
 A fake Gitea, GitLab and SourceForge and local git repositories - no network.

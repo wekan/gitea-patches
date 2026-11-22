@@ -49,6 +49,8 @@ case "$command" in
     python3 -I tests/githubToGiteaLfs.test.py
     python3 -I tests/githubToGiteaApiHost.test.py
     python3 -I tests/screenLog.test.py
+    python3 -I tests/giteaAttachments.test.py
+    python3 -I tests/giteaBackup.test.py
     python3 -I tests/changelogShort.test.py ;;
   release-all)
     exec gh workflow run release-all.yml -R wekan/gitea-patches ${1:+-f ref="$1"} ;;

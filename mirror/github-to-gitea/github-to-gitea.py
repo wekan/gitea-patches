@@ -91,6 +91,7 @@ for _common in (os.path.join(os.path.dirname(HERE), "common"),
         sys.path.insert(0, _common)
         break
 import gitea_attachments  # noqa: E402
+import gitea_backup  # noqa: E402
 INI_FILE = os.path.join(HERE, "github-to-gitea.ini")
 STATE_FILE = os.path.join(HERE, "github-to-gitea-state.json")
 SHIM_FILE = os.path.join(HERE, "github-to-gitea-gh.py")
@@ -125,6 +126,8 @@ SETTINGS = [
     ("options", "bare_repo", "~/gitea/data/gitea-repositories/{owner}/{name}.git",
      "Gitea's bare repositories on this machine ({owner} {name}); git fetch only when found"),
     ("options", "actions_branch", "gitea-actions", "branch the converted workflows are written to"),
+    ("options", "backup_dir", gitea_backup.DEFAULT_DIR,
+     "where backups of Gitea organizations and users go: a directory beside this script, or a path on another disk"),
 ]
 BARE_CANDIDATES = [
     "/var/lib/gitea/data/gitea-repositories/{owner}/{name}.git",
@@ -2176,6 +2179,26 @@ def menu_attachments():
                 menu_prune)])
 
 
+def backup_dir():
+    return gitea_backup.backup_root(opt("backup_dir"), HERE)
+
+
+def set_backup_dir(value):
+    CFG.set("options", "backup_dir", value.strip())
+    save_config()
+    return backup_dir()
+
+
+def menu_backups():
+    """Backups of a Gitea organization or user: <backup_dir>/<name>/<stamp>/<name>.db
+    and <name>.zip, deleting one from Gitea completely, and restoring a backup."""
+    token = opt("token", "gitea")
+    if not token:
+        raise SystemExit(f"Missing [gitea] token: set it in the menu's Settings or in {INI_FILE}")
+    client = gitea_backup.Client(opt("url", "gitea"), token, dry=flag("dry_run"))
+    gitea_backup.menu(client, ask, log, backup_dir(), flag("dry_run"), set_backup_dir)
+
+
 def menu_prune():
     print("\nFree Gitea's disk space: release files of EVERY repository in this Gitea")
     print("  (the releases and their notes stay; only their files are deleted)")
@@ -2397,6 +2420,7 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  8) Help: Gitea Actions runners and variables
  9) Releases kept in full: which organizations, users or repositories keep every release
 10) Gitea's space: largest users, organizations and repositories; attachments, and deleting them
+11) Backups: back up, delete or restore an organization or user (into Gitea or WeKan)
  0) Quit""")
         c = ask("Choice")
         try:
@@ -2435,6 +2459,8 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
                 menu_releases_all()
             elif c == "10":
                 menu_attachments()
+            elif c == "11":
+                menu_backups()
         except SystemExit as e:
             print(e)
         except KeyboardInterrupt:
