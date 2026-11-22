@@ -452,6 +452,25 @@ that sets it.
 
 </details>
 
+**Mirroring on to GitLab and SourceForge** - a branch a tool makes again.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/d43da9185ba70dbb8ffcfa2e1da4d7e62e1539ae">The gitea-actions branch github-to-gitea regenerates reaches GitLab and SourceForge</a>. Thanks to xet7.</summary>
+
+github-to-gitea deletes `gitea-actions` and creates it again on top of the
+newest `main`, so each version is a non-fast-forward of the one before, and
+gitea-to-sourceforge rejected it as "the destination has commits the source
+does not; not forced": the mirror kept the first version for ever. The new
+setting `force_branches` (default `gitea-actions`) names the branches a tool
+regenerates; only those are pushed with force, in a push of their own, because
+a negative refspec excludes its ref from every refspec of a push. Every other
+branch and tag is still never forced and never deleted. `tests/mirror.test.py`
+regenerates the branch and finds it force-updated, while a `main` that moved
+its own way is still not overwritten, and with `force_branches` empty the
+branch is not forced.
+
+</details>
+
 **Long migrations** - Gitea's SQLite and clone time limit, which broke them off,
 and what a long one is doing.
 
