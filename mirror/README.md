@@ -245,6 +245,7 @@ works on one organization or user of the local Gitea:
 | Restore into Gitea | the backup into an organization or user (the same or another name; a missing one is created): the same issue and pull request numbers, authors kept with an admin token (Gitea's `Sudo`), merged pull requests merged, files uploaded again with their links in the text updated, teams and collaborators. A repository Gitea already has is left as it is |
 | Restore into WeKan | one WeKan import `.zip` a repository (`wekan.json` and `attachments/`), cards in Open, Closed and Merged with their comments, labels and files - imported in WeKan from All Boards / Import, or at once with a WeKan address and sign-in |
 | Backup directory | the setting `backup_dir`: `github-to-gitea-backup` beside the script by default, or any path, another disk too |
+| Update a backup straight from GitHub (no Gitea) | a NEW backup of a GitHub organization or user: the newest backup of it made from GitHub, with what is new or changed on GitHub since - or a whole one when there is none. Needs no Gitea and no Gitea token; leaves out the Sources excludes and any more repositories it is given. Also `./github-to-gitea.py --backup-from-github wekan [--exclude wekan/big]` |
 
 `wekan.db` is SQLite and keeps Gitea's own JSON of every record (its tables are
 listed at the top of `gitea_backup.py`). `wekan.zip` holds the files in folders -
@@ -255,6 +256,33 @@ as Omi can list, show and replace one without unpacking the archive. The `.db`
 has each file's size and SHA-256. A backup is written as `<stamp>.partial` and
 renamed when it is whole. Not in a backup: Git LFS objects, Actions runs and
 secrets, and code review comments on pull request lines.
+
+**Straight from GitHub** (`mirror/common/github_backup.py`) the backup has the
+same tables and folders, each row with GitHub's own JSON, and `meta` has
+`source = github`, `based_on` (the backup it was brought up to date from) and
+`missing_files`. The old backup is only read; the new one is a new
+`<stamp>.partial`, renamed when whole. What is downloaded again:
+
+- repositories, labels, milestones, collaborators, teams and members are listed
+  again (topics are in GitHub's repository JSON);
+- issues, pull requests and comments only when updated since the old backup
+  began (GitHub's `since`), pull request details only for new and changed pull
+  requests; everything else is copied from the old backup;
+- release files only when the old backup lacks that file id with the same size
+  and `updated_at` - the others are copied from the old `.zip` as they are, with
+  no download; a release GitHub no longer has is kept, so is a repository;
+- files that issue and comment bodies link to on GitHub
+  (`github.com/user-attachments/...`, `github.com/<owner>/<repo>/files|assets/...`,
+  `user-images.githubusercontent.com`) into `issues/` and `comments/`, with their
+  SHA-256; a link that cannot be fetched is reported and tried again next time;
+- git and the wiki: when GitHub's branches, tags and pull request heads are the
+  old bundle's, the bundle is copied; otherwise a mirror is seeded from the old
+  bundle and fetched from GitHub, so only the new objects come over the network.
+
+The GitHub token goes only to `api.github.com` and `github.com` over https: a
+redirect to another host - GitHub sends files to signed storage addresses -
+drops it, and other hosts never get it. Each repository shows its new and
+changed counts, and the end a summary with the bytes downloaded and copied.
 
 ## Working with WeKan's releases/mirror.sh
 
@@ -297,6 +325,7 @@ python3 -I tests/githubToGiteaRunErrors.test.py
 python3 -I tests/screenLog.test.py
 python3 -I tests/giteaAttachments.test.py
 python3 -I tests/giteaBackup.test.py
+python3 -I tests/githubBackup.test.py
 ```
 
 `tests/giteaBackup.test.py` also runs the whole round trip - back up, delete,

@@ -8,6 +8,10 @@ Actions workflows in Gitea Actions form, so that the release files are built loc
   ./github-to-gitea.py --all               every configured step for every source (cron)
   ./github-to-gitea.py issues releases     only these steps
   ./github-to-gitea.py --source wekan      only this source
+  ./github-to-gitea.py --backup-from-github wekan [--exclude wekan/big]
+                                           a new backup of the GitHub organization or
+                                           user in backup_dir: the newest one brought up
+                                           to date straight from GitHub, no Gitea
   ./github-to-gitea.py --prune-release-files older|all
                                            free Gitea's disk: delete the release files of
                                            every Gitea repository but the newest release's
@@ -92,6 +96,7 @@ for _common in (os.path.join(os.path.dirname(HERE), "common"),
         break
 import gitea_attachments  # noqa: E402
 import gitea_backup  # noqa: E402
+import github_backup  # noqa: E402
 INI_FILE = os.path.join(HERE, "github-to-gitea.ini")
 STATE_FILE = os.path.join(HERE, "github-to-gitea-state.json")
 SHIM_FILE = os.path.join(HERE, "github-to-gitea-gh.py")
@@ -2189,14 +2194,21 @@ def set_backup_dir(value):
     return backup_dir()
 
 
+def github_client():
+    """GitHub for a backup straight from GitHub: the [github] token, or none."""
+    return github_backup.GitHub(opt("token", "github"), say=log)
+
+
 def menu_backups():
     """Backups of a Gitea organization or user: <backup_dir>/<name>/<stamp>/<name>.db
-    and <name>.zip, deleting one from Gitea completely, and restoring a backup."""
+    and <name>.zip, deleting one from Gitea completely, restoring a backup, and
+    bringing a backup up to date straight from GitHub - which needs no Gitea token."""
     token = opt("token", "gitea")
+    client = gitea_backup.Client(opt("url", "gitea"), token, dry=flag("dry_run")) if token else None
     if not token:
-        raise SystemExit(f"Missing [gitea] token: set it in the menu's Settings or in {INI_FILE}")
-    client = gitea_backup.Client(opt("url", "gitea"), token, dry=flag("dry_run"))
-    gitea_backup.menu(client, ask, log, backup_dir(), flag("dry_run"), set_backup_dir)
+        print(f"No [gitea] token (Settings, or {INI_FILE}): only what needs no Gitea can be done.")
+    gitea_backup.menu(client, ask, log, backup_dir(), flag("dry_run"), set_backup_dir,
+                      github=github_client(), excludes=excludes())
 
 
 def menu_prune():
@@ -2420,7 +2432,8 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  8) Help: Gitea Actions runners and variables
  9) Releases kept in full: which organizations, users or repositories keep every release
 10) Gitea's space: largest users, organizations and repositories; attachments, and deleting them
-11) Backups: back up, delete or restore an organization or user (into Gitea or WeKan)
+11) Backups: back up, delete or restore an organization or user (into Gitea or WeKan),
+    or update a backup straight from GitHub (no Gitea)
  0) Quit""")
         c = ask("Choice")
         try:
@@ -2615,6 +2628,13 @@ def main():
                         "older: all but the newest release's, all: every one - and exit")
     p.add_argument("--convert-only", nargs=2, metavar=("SRC", "DST"),
                    help="only convert a local .github/workflows (SRC) into DST, no Gitea")
+    p.add_argument("--backup-from-github", metavar="NAME",
+                   help="a new backup of the GitHub organization or user NAME in backup_dir: the newest "
+                        "backup of it brought up to date straight from GitHub (only what is new or "
+                        "changed is downloaded), or a whole one - no Gitea - and exit")
+    p.add_argument("--exclude", action="append", default=[], metavar="OWNER/NAME",
+                   help="with --backup-from-github: leave this repository out, besides the Sources "
+                        "excludes (again for more)")
     a = p.parse_args()
     global RESTART
     RESTART = a.restart
@@ -2622,6 +2642,13 @@ def main():
     if a.prune_release_files:
         apply_config()
         sys.exit(0 if prune_release_files(a.prune_release_files) else 1)
+    if a.backup_from_github:
+        try:
+            github_backup.update(github_client(), a.backup_from_github, backup_dir(), log, excludes() + a.exclude)
+        except gitea_backup.BackupError as e:
+            log(str(e))
+            sys.exit(1)
+        return
     if a.convert_only:
         select_repo(a.source if a.source and "/" in a.source else "wekan/wekan")
         convert_local(*a.convert_only)

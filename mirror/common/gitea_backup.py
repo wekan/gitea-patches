@@ -24,6 +24,7 @@ without inflating anything. Its folders:
 The .db's tables (FORMAT 1) - every row keeps Gitea's own JSON in `json`:
 
   meta(key, value)                     format, created, gitea, owner, kind, complete
+                                       (from GitHub also: source, github, based_on, missing_files)
   owner(name, kind, json)              the organization or user
   teams(id, name, json, members, repos) an organization's teams; members and repos as JSON
   members(login, json)                 an organization's members
@@ -37,6 +38,10 @@ The .db's tables (FORMAT 1) - every row keeps Gitea's own JSON in `json`:
   releases(repo, id, tag, json)
   files(path, repo, kind, parent, id, name, size, sha256, uuid, json)
                                        every file of the .zip, by its path there
+
+A backup can also be made, and brought up to date, straight from GitHub with no
+Gitea at all (github_backup.py): the same tables and folders, rows with GitHub's own
+JSON, and meta source = github, github, based_on and missing_files besides.
 
 Every call to Gitea goes through a Client: request(method, path, body) for the API,
 download(url, out) and upload(path, name, src, size) for files, and git_url(full,
@@ -884,6 +889,10 @@ class _Restore:
                 body = {k: t.get(k) for k in ("name", "description", "permission", "units", "units_map",
                                               "can_create_org_repo", "includes_all_repositories")
                         if t.get(k) is not None}
+                # A backup made from GitHub has GitHub's words for a team's permission.
+                if body.get("permission") in ("pull", "triage", "push", "maintain"):
+                    body["permission"] = {"pull": "read", "triage": "read", "push": "write"}.get(
+                        body["permission"], "admin")
                 if body.get("units_map"):  # Gitea takes one of the two
                     body.pop("units", None)
                 s, team = self.c.request("POST", f"/orgs/{self.target}/teams", body)
@@ -1102,9 +1111,12 @@ def pick_backup(root, ask):
     return found[int(c) - 1][2] if c.isdigit() and 1 <= int(c) <= min(40, len(found)) else None
 
 
-def menu(client, ask, say, root, dry=False, set_root=None):
+def menu(client, ask, say, root, dry=False, set_root=None, github=None, excludes=()):
     """Backups: make one, delete an organization or user, restore into Gitea or
-    WeKan, and the backup directory. set_root(path) saves a new backup directory."""
+    WeKan, bring a backup up to date straight from GitHub, and the backup directory.
+    set_root(path) saves a new backup directory. client is None without a Gitea
+    token: then only what needs no Gitea is done. github: a github_backup.GitHub;
+    excludes: owner/name repositories left out of an update from GitHub."""
     while True:
         print(f"\nBackups of Gitea organizations and users     directory: {root}"
               + ("\n  (dry run: nothing is deleted or restored)" if dry else ""))
@@ -1114,12 +1126,28 @@ def menu(client, ask, say, root, dry=False, set_root=None):
         print("  4) Restore a backup into WeKan: one board a repository")
         print("  5) List the backups")
         print("  6) Backup directory")
+        print("  7) Update a backup straight from GitHub (no Gitea): only what is new or changed is downloaded")
         print("  0) Back")
         c = ask("Choice")
         try:
             if c in ("", "0"):
                 return
-            if c == "1":
+            if c in ("1", "2", "3") and client is None:
+                say("This needs Gitea: set the [gitea] token in Settings.")
+                continue
+            if c == "7":
+                if github is None:
+                    say("No GitHub client.")
+                    continue
+                import github_backup
+                name = ga.normalize_scope(ask("GitHub organization or user"))
+                if not name or "/" in name:
+                    continue
+                if excludes:
+                    say(f"Left out (Sources excludes): {', '.join(excludes)}")
+                more = ga.parse_excludes(ask("Also leave out (owner/name, comma separated)", ""))
+                github_backup.update(github, name, root, say, list(excludes) + more)
+            elif c == "1":
                 name = ga.normalize_scope(ask("Organization or user"))
                 if name and "/" not in name:
                     backup(client, name, root, say)
