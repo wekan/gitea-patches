@@ -2396,7 +2396,7 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  7) Convert a local .github/workflows to Gitea Actions (a check, no Gitea)
  8) Help: Gitea Actions runners and variables
  9) Releases kept in full: which organizations, users or repositories keep every release
-10) Gitea's attachments: space used, largest repositories, and deleting them
+10) Gitea's space: largest users, organizations and repositories; attachments, and deleting them
  0) Quit""")
         c = ask("Choice")
         try:

@@ -1349,7 +1349,7 @@ Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the new
         for n, (label, _) in enumerate(extra, 10):
             print(f"{n:2}) {label}")
         attachments = 10 + len(extra)
-        print(f"{attachments:2}) Gitea's attachments: space used, largest repositories, and deleting them")
+        print(f"{attachments:2}) Gitea's space: largest users, organizations and repositories; attachments, and deleting them")
         print(" 0) Quit")
         c = ask("Choice")
         try:

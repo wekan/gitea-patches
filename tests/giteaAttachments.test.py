@@ -97,6 +97,8 @@ class FakeGitea:
             # Gitea can list a repository of another owner here (a transfer); it is not microsoft's.
             return self.page([self.repos["microsoft/verybig"], self.repos["microsoft/small"],
                               {"full_name": "someone/else", "owner": {"login": "someone"}, "size": 1}], q)
+        if p == "/repos/search":
+            return 200, dict(zip(("ok", "data"), (True, self.page(list(self.repos.values()), q)[1])))
         if p == "/users/xet7/repos":
             return self.page([self.repos["xet7/notes"]], q)
         if p.startswith("/orgs/"):
@@ -169,6 +171,31 @@ out = "\n".join(said)
 check("space used of one repository lists its largest files", "The 2 largest files of microsoft/verybig:" in out
       and out.index("file11.bin") < out.index("file12.bin") and "file13.bin" not in out)
 
+# --- the users and organizations that take the most space -------------------------------------
+f = FakeGitea()
+owners = ga.by_owner(ga.usage(f, ga.all_repos(f)))
+by = {o["name"]: o for o in owners}
+check("every repository of the Gitea, summed per owner",
+      by["microsoft"]["repos"] == 2 and by["xet7"]["repos"] == 1
+      and by["microsoft"]["total"] == 3 * 1024 ** 3 + 10 * 1024 + 651 * MB + 6000)
+text = ga.owner_report(owners, 1, lambda name: "organization" if name == "microsoft" else "user")
+check("the report: only as many as asked for, the largest first, with kind and share",
+      "The 1 that take the most space" in text and re.search(r"microsoft\s+organization\s+2 ", text)
+      and "xet7  " not in text.split("The 1")[1] and "%" in text)
+said.clear()
+f = FakeGitea()
+ga.largest_owners(f, answers("0", "5"), say)
+check("git sizes only: no attachment list is read", not any(re.search(r"/(releases|issues)", p) for _, p in f.calls)
+      and any("microsoft" in s and "organization" in s for s in said) and any("xet7" in s and "user" in s for s in said))
+said.clear()
+f = FakeGitea()
+ga.largest_owners(f, answers("", "5"), say)
+check("by default release files are counted, not issue and comment files",
+      any("/releases" in p for _, p in f.calls) and not any("/issues" in p for _, p in f.calls)
+      and any("attachments counted: release files" in s for s in said))
+check("the menu offers it as item 3", "3) The users and organizations that take the most space" in
+      open(os.path.join(ROOT, "mirror", "common", "gitea_attachments.py"), encoding="utf-8").read())
+
 # --- excluding ------------------------------------------------------------------------------
 check("an excluded repository is left out of its owner",
       ga.apply_excludes("microsoft", ["microsoft/verybig", "microsoft/small"], ["Microsoft/VeryBig"])
@@ -240,12 +267,12 @@ check("an endpoint that ignores page ends after a page with nothing new",
 gtg = open(os.path.join(ROOT, "mirror", "github-to-gitea", "github-to-gitea.py"), encoding="utf-8").read()
 common = open(os.path.join(ROOT, "mirror", "common", "gitea_mirror.py"), encoding="utf-8").read()
 check("github-to-gitea's menu: Gitea's attachments, with the old every-repository release cleanup in it",
-      "10) Gitea's attachments: space used, largest repositories, and deleting them" in gtg
+      "10) Gitea's space: largest users, organizations and repositories; attachments, and deleting them" in gtg
       and re.search(r"gitea_attachments\.menu\([\s\S]*?menu_prune\)", gtg))
 check("... and its Sources exclude through the same filter", "gitea_attachments.apply_excludes(src," in gtg
       and 'x) Exclude a repository' in gtg)
 check("the mirror scripts' menu offers it after their own items, with only Gitea set up",
-      "Gitea's attachments: space used, largest repositories, and deleting them" in common
+      "Gitea's space: largest users, organizations and repositories; attachments, and deleting them" in common
       and re.search(r"elif c == str\(attachments\):[\s\S]*?gitea_attachments\.menu\(e\.gitea\.request", common))
 check("... and their Sources exclude in expand", "gitea_attachments.apply_excludes(src, out, self.cfg.excludes())" in common)
 check("negative: nothing here deletes without the typed name or outside a dry run's say-so",

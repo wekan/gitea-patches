@@ -135,14 +135,14 @@ def repo_attachments(request, full, kinds=KINDS):
     return out
 
 
-def usage(request, repos, kinds=KINDS, say=None):
+def usage(request, repos, kinds=KINDS, say=None, every=1):
     """One row a repository: name, git (bytes), attachments (bytes), per kind
     (bytes), files (count), total. A repository Gitea cannot list is reported, with
     its git size, and the others are still counted."""
     rows = []
     for n, repo in enumerate(repos, 1):
         full = repo["full_name"]
-        if say and len(repos) > 1:
+        if say and len(repos) > 1 and (n % every == 0 or n == len(repos)):
             say(f"  {n}/{len(repos)} {full}")
         row = {"name": full, "git": (repo.get("size") or 0) * 1024, "attachments": 0, "files": 0,
                "per_kind": {k: 0 for k in kinds}, "error": ""}
@@ -156,6 +156,43 @@ def usage(request, repos, kinds=KINDS, say=None):
         row["total"] = row["git"] + row["attachments"]
         rows.append(row)
     return rows
+
+
+def all_repos(request):
+    """Every repository of the Gitea the token can see - every one with an admin token."""
+    return sorted(paged(request, "/repos/search?sort=alpha"), key=lambda r: r["full_name"].lower())
+
+
+def by_owner(rows):
+    """The per-repository rows summed per owner (organization or user): name,
+    repositories, git, attachments, files, total."""
+    owners = {}
+    for r in rows:
+        name = r["name"].split("/")[0]
+        o = owners.setdefault(name.lower(), {"name": name, "repos": 0, "git": 0, "attachments": 0, "files": 0, "total": 0})
+        o["repos"] += 1
+        for k in ("git", "attachments", "files", "total"):
+            o[k] += r[k]
+    return list(owners.values())
+
+
+def owner_report(owners, n, kind_of=None):
+    """The text of the owners' report: the n owners that take the most space."""
+    top = largest(owners, n)
+    total = sum(o["total"] for o in owners)
+    lines = [f"{len(owners)} users and organizations, {sum(o['repos'] for o in owners)} repositories: "
+             f"git {human(sum(o['git'] for o in owners))}, attachments {human(sum(o['attachments'] for o in owners))}, "
+             f"together {human(total)}."]
+    if top:
+        width = max(len(o["name"]) for o in top)
+        lines.append(f"\nThe {len(top)} that take the most space, git and attachments together:")
+        lines.append(f"  {'owner'.ljust(width)}  {'kind':12}  {'repos':>6}  {'git':>10}  {'attachments':>11}  {'together':>10}  {'share':>6}")
+        for o in top:
+            kind = kind_of(o["name"]) if kind_of else ""
+            share = f"{100 * o['total'] / total:.1f}%" if total else "-"
+            lines.append(f"  {o['name'].ljust(width)}  {kind:12}  {o['repos']:>6}  {human(o['git']):>10}  "
+                         f"{human(o['attachments']):>11}  {human(o['total']):>10}  {share:>6}")
+    return "\n".join(lines)
 
 
 def largest(rows, n, by="total"):
@@ -217,10 +254,12 @@ def delete(request, items, dry=False, say=None):
 SCOPE_PROMPT = "Gitea organization or user (every repository it owns), or owner/name (one repository)"
 
 
-def ask_kinds(ask):
+def ask_kinds(ask, default="1 2 3", git_only=False):
     for i, k in enumerate(KINDS, 1):
         print(f"  {i}) {KIND_NAMES[k]}")
-    chosen = ask("Which, as numbers (e.g. 1, or 1 2 3)", "1 2 3")
+    if git_only:
+        print("  0) none: git sizes only, which Gitea knows without reading anything")
+    chosen = ask("Which, as numbers (e.g. 1, or 1 2 3)", default)
     picked = {KINDS[int(x) - 1] for x in re.split(r"[,\s]+", chosen) if x.isdigit() and 1 <= int(x) <= len(KINDS)}
     return tuple(k for k in KINDS if k in picked)
 
@@ -265,6 +304,29 @@ def space_used(request, ask, say, excludes=()):
             say(f"\nThe {len(files)} largest files of {scope}:")
             for a in files:
                 say(f"  {human(a['size']):>10}  {a['where']}: {a['name']}")
+
+
+def largest_owners(request, ask, say):
+    """Read-only: the users and organizations of this Gitea that take the most
+    space, git and attachments together - every repository the token can see."""
+    print("Attachments to count (git sizes are always counted). Reading issue and comment files"
+          "\nof every repository takes long in a large Gitea; release files are quick.")
+    kinds = ask_kinds(ask, "1", git_only=True)
+    n = ask_count(ask, "How many of the largest users and organizations to show", 20)
+    say("Reading every repository of this Gitea ...")
+    repos = all_repos(request)
+    rows = usage(request, repos, kinds, say, every=50)
+    owners = by_owner(rows)
+    kinds_seen = {}
+
+    def kind_of(name):
+        if name not in kinds_seen:
+            kinds_seen[name] = "organization" if request("GET", f"/orgs/{name}")[0] == 200 else "user"
+        return kinds_seen[name]
+
+    say(owner_report(owners, n, kind_of))
+    if kinds != KINDS:
+        say("  (attachments counted: " + (", ".join(KIND_NAMES[k] for k in kinds) or "none") + ")")
 
 
 def delete_attachments(request, ask, say, dry=False, excludes=(), note=""):
@@ -319,7 +381,8 @@ def menu(request, ask, say, dry=False, excludes=(), note="", extra=()):
               "\nand comments" + (" (dry run: nothing is deleted)" if dry else ""))
         print("  1) Space used: an organization, a user or one repository, and the largest (read-only)")
         print("  2) Delete attachments: of an organization or user (every repository), or of one repository")
-        for n, (label, _) in enumerate(extra, 3):
+        print("  3) The users and organizations that take the most space in this Gitea (read-only)")
+        for n, (label, _) in enumerate(extra, 4):
             print(f"  {n}) {label}")
         print("  0) Back")
         c = ask("Choice")
@@ -330,7 +393,9 @@ def menu(request, ask, say, dry=False, excludes=(), note="", extra=()):
                 space_used(request, ask, say, excludes)
             elif c == "2":
                 delete_attachments(request, ask, say, dry, excludes, note)
-            elif c.isdigit() and 3 <= int(c) < 3 + len(extra):
-                extra[int(c) - 3][1]()
+            elif c == "3":
+                largest_owners(request, ask, say)
+            elif c.isdigit() and 4 <= int(c) < 4 + len(extra):
+                extra[int(c) - 4][1]()
         except AttachmentError as e:
             say(str(e))

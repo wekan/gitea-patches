@@ -93,7 +93,7 @@ and so does every repository in Releases kept in full. All three scripts do this
 GitLab only those files' links and package files are deleted, not the release's
 package.
 
-**Gitea's attachments: space used, and deleting them.** github-to-gitea's menu item
+**Gitea's space: users, organizations, repositories and attachments.** github-to-gitea's menu item
 **10)**, and the mirror scripts' item after their own (11 in gitea-to-sourceforge, 10
 in gitea-to-gitlab), are the same menu (`common/gitea_attachments.py`). An
 attachment is a release's file or a file attached to an issue, a pull request or a
@@ -103,6 +103,7 @@ comment; a repository's git is never deleted here.
 |--------|--------------|
 | 1) Space used | for an organization or user (every repository it owns) or one `owner/name`: git, attachments and both together, per kind, and the N largest repositories (it asks how many) by git and attachments together; for one repository also its N largest files. Read-only |
 | 2) Delete attachments | the chosen kinds (release files, issue and pull request files, comment files) of an organization or user - its excluded repositories left out - or of one repository. Lists what would go and its size, then deletes only when the scope's name (e.g. `wekan/wekan`) is typed; a dry run deletes nothing |
+| 3) The users and organizations that take the most space | every repository of the Gitea the token can see - every one with an admin token - summed per user and organization: repositories, git, attachments, together and share, the N largest (it asks how many). Release files are counted by default, `0` counts git only (instant); issue and comment files take long in a large Gitea. Read-only |
 
 Gitea removes a deleted attachment's file from its storage. The next releases step
 brings back the files of the releases it keeps (`release_assets_keep`, Releases kept
