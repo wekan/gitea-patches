@@ -21,8 +21,9 @@ repository's changes applied as **git commits**, and released with its source as
 upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
 SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
-clone time limit, github-to-gitea recognises **GitHub's API by its parsed
-host**, and Gitea carries the **security hardening** code scanning found.
+clone time limit, an organization or user can be **backed up, deleted and
+restored**, github-to-gitea recognises **GitHub's API by its parsed host**,
+and Gitea carries the **security hardening** code scanning found.
 
 This release fixes the following SECURITY ISSUES found by GitHub CodeQL code scanning:
 
@@ -90,6 +91,26 @@ and the zips.
 </details>
 
 **Mirroring** - the local Gitea on to GitLab and SourceForge.
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/cbf87d86cf8c185e0e0c28b80f7bdcf9aeb480c3">Back up, delete and restore a Gitea organization or user - into Gitea or WeKan</a>. Thanks to xet7.</summary>
+
+github-to-gitea's menu item 11, Backups (`mirror/common/gitea_backup.py`).
+**Back up** writes every repository, issue, pull request, comment, label,
+milestone, release, wiki, team, collaborator and file of an organization or
+user into `<backup_dir>/<name>/YYYY-MM-DD_HH-MM-SS/<name>.db` - SQLite with
+Gitea's own JSON of every record and each file's size and SHA-256 - and
+`<name>.zip`, with git and wiki bundles and every file in folders, stored and
+not compressed, so a reader can show or replace one entry in place.
+**Delete** removes the organization or user from Gitea completely, packages
+too, after listing what goes and only when its name is typed. **Restore into
+Gitea** keeps the issue and pull request numbers, the authors (Sudo), merged
+pull requests, files with their links updated, teams and collaborators;
+**restore into WeKan** writes one board .zip a repository and can import it
+at once. `backup_dir` can point to another disk. `tests/giteaBackup.test.py`
+runs the round trip against a disposable Gitea.
+
+</details>
 
 <details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/e994d45ca067704b3b7089407154187cc6262b2f">The users and organizations that take the most space in the local Gitea</a>. Thanks to xet7.</summary>
