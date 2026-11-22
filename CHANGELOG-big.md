@@ -92,6 +92,27 @@ and the zips.
 **Mirroring** - the local Gitea on to GitLab and SourceForge.
 
 <details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/47fdc4ed21fd8f8b6462b4a195b079f0f12dd8c5">Gitea's attachments: space used, the largest repositories, and deleting them; excluded repositories</a>. Thanks to xet7.</summary>
+
+github-to-gitea, gitea-to-gitlab and gitea-to-sourceforge share a new menu
+(`mirror/common/gitea_attachments.py`), github-to-gitea's item 10 and the mirror
+scripts' item after their own. **Space used**, for an organization or user
+(every repository it owns) or one `owner/name`, shows git, attachments
+(release files, issue and pull request files, comment files) and both
+together, and the N largest repositories - it asks how many - by git and
+attachments together; for one repository also its N largest files.
+**Delete attachments** removes the chosen kinds of an organization or user,
+or of one repository such as `wekan/wekan`: it lists what would go and its
+size, and deletes only when the scope's name is typed; a dry run deletes
+nothing. github-to-gitea's earlier release-file cleanup of every repository
+is an item of the same menu. Sources can leave a repository out - `microsoft`
+with `microsoft/verybig` excluded - in both scripts; a repository listed by
+name is never left out. `tests/giteaAttachments.test.py` runs it against a
+fake Gitea, and `tests/mirror.test.py` checks the mirrors' sources.
+
+</details>
+
+<details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/c1678702012830f408cffe43d785468349a3bcf3">Mirror the local Gitea to GitLab and SourceForge, in step with WeKan's mirror</a>. Thanks to xet7.</summary>
 
 `mirror/gitea-to-gitlab` and `mirror/gitea-to-sourceforge` copy git branches and
