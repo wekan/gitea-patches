@@ -22,8 +22,9 @@ upstream releases**, built from the zip without history. The web UI is
 **completely in Finnish**, the local Gitea is **mirrored on to GitLab and
 SourceForge**, **long migrations** no longer break off on Gitea's SQLite and
 clone time limit, an organization or user can be **backed up, deleted and
-restored**, github-to-gitea recognises **GitHub's API by its parsed host**,
-and Gitea carries the **security hardening** code scanning found.
+restored** - or updated **straight from GitHub** - github-to-gitea recognises
+**GitHub's API by its parsed host**, and Gitea carries the **security
+hardening** code scanning found.
 
 This release fixes the following SECURITY ISSUES found by GitHub CodeQL code scanning:
 
@@ -109,6 +110,25 @@ pull requests, files with their links updated, teams and collaborators;
 **restore into WeKan** writes one board .zip a repository and can import it
 at once. `backup_dir` can point to another disk. `tests/giteaBackup.test.py`
 runs the round trip against a disposable Gitea.
+
+</details>
+
+<details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/944e8d58b51984f79220cc3cff8f4d36986f0df2">Update a backup straight from GitHub, without Gitea</a>. Thanks to xet7.</summary>
+
+github-to-gitea's Backups menu has item 7, and the command line
+`--backup-from-github NAME [--exclude OWNER/NAME]`
+(`mirror/common/github_backup.py`). It takes the newest backup of a GitHub
+organization or user made from GitHub and writes a new backup beside it with
+everything the old one had and what is new or changed on GitHub - or a whole
+one when there is none - without any Gitea or Gitea token. Issues, pull
+requests and comments are read only when updated since the old backup
+began; release files, attachments and unchanged git bundles are copied from
+the old `.zip`, and a changed repository is fetched into a mirror seeded
+from its old bundle, so only new objects are downloaded. Files linked from
+issue and comment bodies on GitHub are saved too, and the token goes only to
+GitHub's own addresses. The format stays FORMAT 1 with `source = github` in
+`meta`. `tests/githubBackup.test.py` runs it against a fake GitHub.
 
 </details>
 
