@@ -83,6 +83,14 @@ import urllib.request
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The mirror scripts' shared modules: mirror/common beside this directory - or, for a
+# copy of this script in WeKan's .tools/, the gitea-patches checkout under it.
+for _common in (os.path.join(os.path.dirname(HERE), "common"),
+                os.path.join(HERE, "w", "gitea-patches", "mirror", "common")):
+    if os.path.isfile(os.path.join(_common, "gitea_attachments.py")):
+        sys.path.insert(0, _common)
+        break
+import gitea_attachments  # noqa: E402
 INI_FILE = os.path.join(HERE, "github-to-gitea.ini")
 STATE_FILE = os.path.join(HERE, "github-to-gitea-state.json")
 SHIM_FILE = os.path.join(HERE, "github-to-gitea-gh.py")
@@ -440,6 +448,16 @@ def releases_all():
 
 def set_releases_all(items):
     CFG.set("releases_all", "list", "\n" + "\n".join(items) if items else "")
+
+
+def excludes():
+    """Repositories left out of what an organization or user expands to, e.g.
+    microsoft/verybig while microsoft is a source."""
+    return gitea_attachments.parse_excludes(CFG.get("sources", "exclude", fallback=""))
+
+
+def set_excludes(items):
+    CFG.set("sources", "exclude", "\n" + "\n".join(items) if items else "")
 
 
 def keeps_all_releases(full=None, private=None):
@@ -1836,7 +1854,10 @@ def expand_source(src):
             else:
                 repos = gh_all(f"users/{src}/repos", {"type": "owner", "sort": "full_name"})
             repos = [r for r in repos if r["owner"]["login"].lower() == src.lower()]
-        return [r["full_name"] for r in repos if wanted(r)]
+        names, gone = gitea_attachments.apply_excludes(src, [r["full_name"] for r in repos if wanted(r)], excludes())
+        for name in gone:
+            log(f"  {name}: excluded in Sources; left out")
+        return names
     except LookupError as e:
         raise RepoError(f"{src}: {e}")
 
@@ -2145,6 +2166,16 @@ def prune_release_files(mode):
     return not failed
 
 
+def menu_attachments():
+    apply_config()
+    gitea_attachments.menu(
+        lambda method, path: gitea(method, path), ask, log, DRY, excludes(),
+        note="The next releases step brings back the files of the releases it keeps "
+             "(release_assets_keep, Releases kept in full); release_assets = none keeps them away.",
+        extra=[("Release files of EVERY Gitea repository: keep the newest release's, or delete all",
+                menu_prune)])
+
+
 def menu_prune():
     print("\nFree Gitea's disk space: release files of EVERY repository in this Gitea")
     print("  (the releases and their notes stay; only their files are deleted)")
@@ -2238,7 +2269,14 @@ def menu_sources():
             print(f" {i:2}) {s}  ({what})")
         if not items:
             print("    (none)")
-        print("  a) Add   r) Remove   s) Show what would be imported   0) Back")
+        left_out = excludes()
+        print("\n  Excluded (left out of an organization or user):")
+        for i, s in enumerate(left_out, 1):
+            print(f" {i:2}) {s}")
+        if not left_out:
+            print("    (none)")
+        print("  a) Add   r) Remove   x) Exclude a repository   i) Include an excluded one again")
+        print("  s) Show what would be imported   0) Back")
         c = ask("Choice").lower()
         if c in ("", "0"):
             return
@@ -2257,6 +2295,20 @@ def menu_sources():
             if n.isdigit() and 1 <= int(n) <= len(items):
                 del items[int(n) - 1]
                 set_sources(items)
+                save_config()
+        elif c == "x":
+            v = ask("Repository to leave out, as owner/name (e.g. microsoft/verybig)")
+            v = gitea_attachments.normalize_scope(v.replace("https://github.com/", ""))
+            if v and "/" in v and v.lower() not in [x.lower() for x in left_out]:
+                set_excludes(left_out + [v])
+                save_config()
+            elif v:
+                print("Not owner/name, or already excluded.")
+        elif c == "i":
+            n = ask("Number to include again")
+            if n.isdigit() and 1 <= int(n) <= len(left_out):
+                del left_out[int(n) - 1]
+                set_excludes(left_out)
                 save_config()
         elif c == "s":
             apply_config()
@@ -2344,7 +2396,7 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  7) Convert a local .github/workflows to Gitea Actions (a check, no Gitea)
  8) Help: Gitea Actions runners and variables
  9) Releases kept in full: which organizations, users or repositories keep every release
-10) Free Gitea's disk space: delete release attachments of every Gitea repository
+10) Gitea's attachments: space used, largest repositories, and deleting them
  0) Quit""")
         c = ask("Choice")
         try:
@@ -2382,7 +2434,7 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
             elif c == "9":
                 menu_releases_all()
             elif c == "10":
-                menu_prune()
+                menu_attachments()
         except SystemExit as e:
             print(e)
         except KeyboardInterrupt:

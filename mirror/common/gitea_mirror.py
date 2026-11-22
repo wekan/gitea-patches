@@ -56,6 +56,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+import gitea_attachments
+
 STEPS = ["git", "issues", "releases", "avatars"]
 STEP_NAMES = {"git": "git branches and tags, and the wiki (pushed without force)",
               "issues": "issues and pull requests with comments, labels, milestones",
@@ -412,6 +414,14 @@ class Config:
     def set_sources(self, items):
         self.set("sources", "list", "\n" + "\n".join(items) if items else "")
 
+    def excludes(self):
+        """Repositories left out of what an organization or user expands to, e.g.
+        microsoft/verybig while microsoft is a source."""
+        return gitea_attachments.parse_excludes(self.cfg.get("sources", "exclude", fallback=""))
+
+    def set_excludes(self, items):
+        self.set("sources", "exclude", "\n" + "\n".join(items) if items else "")
+
     def destinations(self):
         return dict(self.cfg.items("destinations")) if self.cfg.has_section("destinations") else {}
 
@@ -475,6 +485,11 @@ class Gitea:
         if status != 200:
             raise LookupError(f"Gitea {path}: {status} {message(data)}")
         return data
+
+    def request(self, method, path):
+        """(status, data) for any call, path from the API root - for gitea_attachments."""
+        status, data, _ = http(method, self.api + path, self.headers())
+        return status, data
 
     def all(self, path, params=None, key=None):
         """Every page. Stops when a page brings nothing new, so an endpoint that ignores
@@ -635,6 +650,9 @@ class Engine:
                 if r.get("archived") and not self.cfg.flag("include_archived"):
                     continue
                 out.append(r["full_name"])
+            out, gone = gitea_attachments.apply_excludes(src, out, self.cfg.excludes())
+            for name in gone:
+                log(f"  {name}: excluded in Sources; left out")
             return sorted(out, key=str.lower)
         except LookupError as e:
             raise RepoError(f"{src}: {e}")
@@ -1138,7 +1156,14 @@ def menu_sources(e):
             print(f" {i:2}) {s}  ({what})")
         if not items:
             print("    (none)")
-        print("  a) Add   r) Remove   s) Show what would be mirrored   0) Back")
+        excludes = e.cfg.excludes()
+        print("\n  Excluded (left out of an organization or user):")
+        for i, s in enumerate(excludes, 1):
+            print(f" {i:2}) {s}")
+        if not excludes:
+            print("    (none)")
+        print("  a) Add   r) Remove   x) Exclude a repository   i) Include an excluded one again")
+        print("  s) Show what would be mirrored   0) Back")
         c = ask("Choice").lower()
         if c in ("", "0"):
             return
@@ -1156,6 +1181,17 @@ def menu_sources(e):
             if n.isdigit() and 1 <= int(n) <= len(items):
                 del items[int(n) - 1]
                 e.cfg.set_sources(items)
+        elif c == "x":
+            v = gitea_attachments.normalize_scope(ask("Repository to leave out, as owner/name (e.g. microsoft/verybig)"))
+            if v and "/" in v and v.lower() not in [x.lower() for x in excludes]:
+                e.cfg.set_excludes(excludes + [v])
+            elif v:
+                print("Not owner/name, or already excluded.")
+        elif c == "i":
+            n = ask("Number to include again")
+            if n.isdigit() and 1 <= int(n) <= len(excludes):
+                del excludes[int(n) - 1]
+                e.cfg.set_excludes(excludes)
         elif c == "s":
             e.configure()
             for s in items:
@@ -1312,6 +1348,8 @@ Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the new
         extra = getattr(t, "MENU_EXTRA", ())
         for n, (label, _) in enumerate(extra, 10):
             print(f"{n:2}) {label}")
+        attachments = 10 + len(extra)
+        print(f"{attachments:2}) Gitea's attachments: space used, largest repositories, and deleting them")
         print(" 0) Quit")
         c = ask("Choice")
         try:
@@ -1344,6 +1382,12 @@ Releases kept in full: {', '.join(e.cfg.releases_all()) or '(none - only the new
                 menu_releases_all(e)
             elif c.isdigit() and 10 <= int(c) < 10 + len(extra):
                 getattr(t, extra[int(c) - 10][1])(e)
+            elif c == str(attachments):
+                # Only Gitea is needed here, not the destination's settings.
+                if not e.cfg.get("token", "gitea"):
+                    raise SystemExit(f"Missing [gitea] token: set it in the menu's Settings or in {e.ini}")
+                e.gitea = Gitea(e.cfg.get("url", "gitea"), e.cfg.get("token", "gitea"), e.cfg.get("public_url", "gitea"))
+                gitea_attachments.menu(e.gitea.request, ask, log, e.cfg.flag("dry_run"), e.cfg.excludes())
         except SystemExit as err:
             print(err)
         except KeyboardInterrupt:

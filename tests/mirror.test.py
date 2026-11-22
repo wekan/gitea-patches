@@ -243,6 +243,15 @@ e = engine(fake, here)
 check("org source: only repositories the org owns", e.expand("wekan") == ["wekan/secret", "wekan/wekan"])
 check("(allprivate): only private ones", e.expand("(allprivate)") == ["wekan/secret"])
 check("(allpublic): only public ones", e.expand("(allpublic)") == ["other/x", "wekan/wekan"])
+# Sources -> Exclude: microsoft with microsoft/verybig left out.
+e.cfg.set_excludes(["Wekan/Secret"])
+check("an excluded repository is left out of its organization", e.expand("wekan") == ["wekan/wekan"])
+check("... and of (allprivate)", e.expand("(allprivate)") == [])
+check("negative: a repository asked for by name is not left out", e.expand("wekan/secret") == ["wekan/secret"])
+check("the exclusions are saved in [sources] exclude", e.cfg.excludes() == ["Wekan/Secret"]
+      and "Wekan/Secret" in open(e.ini, encoding="utf-8").read())
+e.cfg.set_excludes([])
+check("with none excluded, the organization is whole again", e.expand("wekan") == ["wekan/secret", "wekan/wekan"])
 
 # dry run writes nothing
 e.cfg.set("options", "dry_run", "yes")
