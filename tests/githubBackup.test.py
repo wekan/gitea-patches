@@ -276,8 +276,8 @@ check("a file's id is stable and fits a JavaScript number", hb.file_id("x") == h
 
 # --- the first run: a whole backup from GitHub -------------------------------------------------
 first = hb.update(client(), "acme", BACKUPS, shown.append, excludes=["acme/skipme"])
-check("a whole backup is made, named by its stamp, no .partial left",
-      os.path.isdir(first) and not any(x.endswith(".partial") for x in os.listdir(os.path.dirname(first))))
+check("a whole backup is made: <dir>/acme/acme.db and acme.zip, no dated directory, nothing left over",
+      first == os.path.join(BACKUPS, "acme") and sorted(os.listdir(first)) == ["acme.db", "acme.zip"])
 b = gb.Backup(first)
 check("gitea_backup.Backup reads it; meta says it came from GitHub",
       b.meta.get("source") == "github" and b.meta.get("complete") == "yes" and b.meta.get("format") == "1")
@@ -320,7 +320,13 @@ check("negative: a redirect to another host drops the Authorization header", fil
 check("negative: a link to a host that is not GitHub's is never fetched", never.log == [])
 
 # --- GitHub changes, and the second run -------------------------------------------------------
-before = tree_hash(first)
+with zipfile.ZipFile(os.path.join(first, "acme.zip")) as z1:
+    before_entries = {i.filename: (i.CRC, i.file_size) for i in z1.infolist()}
+    first_bytes = {p: z1.read(p) for p in ("proj/releases/v1/one.zip", img1[0]["path"])}
+zip_before = os.path.getsize(os.path.join(first, "acme.zip"))
+G["releases"][901] = {"id": 901, "tag_name": "v0", "name": "v0", "body": "gone soon", "draft": False,
+                      "prerelease": False, "published_at": "2026-01-01T00:00:00Z", "target_commitish": "main",
+                      "assets": []}
 G["issue"](4, "New issue", f"with {gh_srv.url}/user-attachments/assets/img2 attached", LATER[0])
 G["issues"][1]["body"] += "\n\nEdited."
 G["issues"][1]["updated_at"] = LATER[1]
@@ -337,10 +343,20 @@ for p in (gh_srv, files):
 shown.clear()
 second = hb.update(client(), "acme", BACKUPS, shown.append, excludes=["acme/skipme"])
 st = hb.update.stats
-check("a second, separate backup directory", second != first and os.path.isdir(second))
-check("negative: the old backup is byte-identical", tree_hash(first) == before)
+check("the same one backup is updated in place: no new directory, nothing left over",
+      second == first and sorted(os.listdir(first)) == ["acme.db", "acme.zip"])
 b2 = gb.Backup(second)
-check("it is based on the first", b2.meta.get("based_on") == os.path.basename(first))
+check("meta: runs 2, created kept, updated and github_updated newer, sources github",
+      b2.meta.get("runs") == "2" and b2.meta.get("sources") == "github" and
+      b2.meta["created"] < b2.meta["updated"] == b2.meta["github_updated"])
+zip_after = os.path.getsize(os.path.join(first, "acme.zip"))
+new_bytes = sum(i.file_size for i in b2.zip.infolist() if before_entries.get(i.filename) != (i.CRC, i.file_size))
+grown = zip_after - zip_before
+print(f"    zip {zip_before} -> {zip_after} bytes (+{grown}); changed or new content {new_bytes} bytes")
+check("the zip grew only by the new and changed content (no second copy of anything unchanged)",
+      grown <= new_bytes + 512 * (len(b2.zip.infolist()) - len(before_entries) + 2))
+check("every unchanged entry is the same bytes as before",
+      all(b2.zip.getinfo(n).CRC == c for n, (c, _) in before_entries.items() if n != "proj/git.bundle"))
 issues = {r["number"]: json.loads(r["json"]) for r in b2.rows("SELECT * FROM issues")}
 check("the new issue and the edited one are in it", sorted(issues) == [1, 2, 3, 4]
       and issues[1]["body"].endswith("Edited."))
@@ -353,7 +369,7 @@ check("issues and comments are asked only since the old backup", issues_q and al
               for p in gh_srv.hits("/repos/acme/proj/issues/comments")))
 check("negative: an unchanged pull request's details are not asked again", gh_srv.hits("/repos/acme/proj/pulls/2") == [])
 f2 = {f["path"]: f for f in b2.rows("SELECT * FROM files")}
-check("the new release file is downloaded; the old one is copied",
+check("the new release file is downloaded; the old one is kept",
       "proj/releases/v1/two.zip" in f2 and "proj/releases/v1/one.zip" in f2
       and files.hits("/s3/asset/102") and not files.hits("/s3/asset/101")
       and not gh_srv.hits("/repos/acme/proj/releases/assets/101"))
@@ -362,15 +378,14 @@ check("negative: attachments the old backup has are not downloaded again (img1 o
 check("the new issue's attachment is downloaded", any(p.startswith("proj/issues/4/") for p in f2))
 check("a file that failed before is tried again, and saved",
       any(p.startswith("proj/issues/3/") and "late" in p for p in f2) and json.loads(b2.meta["missing_files"]) == [])
-with zipfile.ZipFile(os.path.join(first, "acme.zip")) as z1:
-    same = all(b2.zip.read(p) == z1.read(p) for p in ("proj/releases/v1/one.zip", img1[0]["path"]))
-check("copied files are the same bytes", same)
+same = all(b2.zip.read(p) == first_bytes[p] for p in ("proj/releases/v1/one.zip", img1[0]["path"]))
+check("kept files are the same bytes", same)
 bundle = os.path.join(TMP, "check.bundle")
 b2.extract("proj/git.bundle", bundle)
 heads = git("bundle", "list-heads", bundle)
 check("the git bundle has the new commit, the tag and the pull request head",
       new_head in heads and "refs/tags/v1" in heads and "refs/pull/2/head" in heads)
-check("an unchanged repository's bundle is copied, not fetched again", st.git_same >= 2 and st.git_fetched == 1)
+check("an unchanged repository's bundle is kept, not fetched again", st.git_same >= 2 and st.git_fetched == 1)
 check("a changed repository is fetched into a mirror seeded from the old bundle",
       any("git:" in s and "only new objects fetched" in s for s in shown))
 print("\n".join("    " + s for s in shown))
@@ -378,6 +393,39 @@ check("the summary says what was new and the bytes", any(s.startswith("Summary: 
 out = gb.wekan_zips(second, os.path.join(TMP, "wekan2"), lambda m: None)
 check("wekan_zips reads the updated backup", len(out) == 2)
 b2.close()
+
+# --- a third run: GitHub deleted a release; nothing else changed ------------------------------
+del G["releases"][901]
+for p in (gh_srv, files):
+    p.log.clear()
+shown.clear()
+zip2 = open(os.path.join(first, "acme.zip"), "rb").read()
+hb.update(client(), "acme", BACKUPS, shown.append, excludes=["acme/skipme"])
+b3 = gb.Backup(first)
+check("a release deleted at GitHub stays in the backup", [r["tag"] for r in b3.rows(
+      "SELECT tag FROM releases ORDER BY tag")] == ["v0", "v1"])
+check("... as old data: seen is the run before, the rest the newest run (3)",
+      b3.rows("SELECT seen FROM releases WHERE tag = 'v0'")[0]["seen"] == 2 and b3.meta["runs"] == "3"
+      and b3.rows("SELECT seen FROM releases WHERE tag = 'v1'")[0]["seen"] == 3)
+check("negative: unchanged issues, comments and their files are not old data",
+      not b3.rows("SELECT 1 FROM issues WHERE seen < 3") and not b3.rows("SELECT 1 FROM comments WHERE seen < 3")
+      and not b3.rows("SELECT 1 FROM files WHERE seen < 3"))
+b3.close()
+check("nothing changed in the zip: it is not written at all", open(os.path.join(first, "acme.zip"), "rb").read() == zip2)
+check("negative: no file is downloaded again", files.log == [])
+runs, data, paths = gb.old_only_report(first, shown.append)
+check("old data: exactly the deleted release", {t: [r.get("tag") for r in v] for t, v in data.items() if v}
+      == {"releases": ["v0"]} and paths == {})
+check("the old-data list names it under its repository", any("releases 1: v0" in s for s in shown))
+
+# --- two runs at once: the second refuses ------------------------------------------------------
+with gb.Lock(first):
+    try:
+        hb.update(client(), "acme", BACKUPS, shown.append, excludes=["acme/skipme"])
+        check("negative: a second run while one holds the lock refuses", False)
+    except gb.BackupError as e:
+        check("negative: a second run while one holds the lock refuses", "being updated by another run" in str(e))
+check("the lock is gone after its run", not os.path.exists(os.path.join(first, gb.LOCK)))
 check("negative: nothing was ever fetched from a host that is not GitHub's", never.log == [])
 check("negative: storage hosts never got the token", all(a is None for _, a in files.log))
 

@@ -9,9 +9,21 @@ Actions workflows in Gitea Actions form, so that the release files are built loc
   ./github-to-gitea.py issues releases     only these steps
   ./github-to-gitea.py --source wekan      only this source
   ./github-to-gitea.py --backup-from-github wekan [--exclude wekan/big]
-                                           a new backup of the GitHub organization or
-                                           user in backup_dir: the newest one brought up
-                                           to date straight from GitHub, no Gitea
+                                           the one backup of the GitHub organization or
+                                           user in backup_dir, updated in place straight
+                                           from GitHub (only what is new or changed), no Gitea
+  ./github-to-gitea.py --combine-backups [wekan|all] [--dry-run] [--delete-partial]
+                                           combine the dated backups of older versions
+                                           into one, verify it, delete them: saves disk
+                                           space; needs no Gitea, GitHub or token
+  ./github-to-gitea.py --list-old-only wekan
+                                           what older backups had that the newest does not
+  ./github-to-gitea.py --delete-old-only wekan [--dry-run] [--confirm wekan]
+                                           delete that from the backup (the name typed)
+  ./github-to-gitea.py --migrate-all-gitea [--dry-run] [--continue-on-error]
+                                           move ALL of Gitea into backups, a repository at
+                                           a time, smallest first, each deleted from Gitea
+                                           once its backup is verified
   ./github-to-gitea.py --prune-release-files older|all
                                            free Gitea's disk: delete the release files of
                                            every Gitea repository but the newest release's
@@ -2199,16 +2211,28 @@ def github_client():
     return github_backup.GitHub(opt("token", "github"), say=log)
 
 
-def menu_backups():
-    """Backups of a Gitea organization or user: <backup_dir>/<name>/<stamp>/<name>.db
-    and <name>.zip, deleting one from Gitea completely, restoring a backup, and
-    bringing a backup up to date straight from GitHub - which needs no Gitea token."""
+def gitea_data_dir():
+    """Gitea's repositories directory from the setting bare_repo (the part before
+    {owner}), for telling whether the backups are on the same disk."""
+    v = opt("bare_repo")
+    return os.path.expanduser(v.split("{owner}")[0] if "{owner}" in v else os.path.dirname(v)) if v else None
+
+
+def gitea_client():
     token = opt("token", "gitea")
-    client = gitea_backup.Client(opt("url", "gitea"), token, dry=flag("dry_run")) if token else None
-    if not token:
+    return gitea_backup.Client(opt("url", "gitea"), token, dry=flag("dry_run")) if token else None
+
+
+def menu_backups():
+    """Backups of a Gitea organization or user: <backup_dir>/<name>/<name>.db and
+    <name>.zip, updated in place; deleting one from Gitea completely, restoring a
+    backup, bringing a backup up to date straight from GitHub - which needs no Gitea
+    token - combining dated backups, old data, and moving all of Gitea into backups."""
+    client = gitea_client()
+    if client is None:
         print(f"No [gitea] token (Settings, or {INI_FILE}): only what needs no Gitea can be done.")
     gitea_backup.menu(client, ask, log, backup_dir(), flag("dry_run"), set_backup_dir,
-                      github=github_client(), excludes=excludes())
+                      github=github_client(), excludes=excludes(), gitea_data=gitea_data_dir())
 
 
 def menu_prune():
@@ -2433,7 +2457,8 @@ Releases kept in full: {', '.join(releases_all()) or '(none - only the newest re
  9) Releases kept in full: which organizations, users or repositories keep every release
 10) Gitea's space: largest users, organizations and repositories; attachments, and deleting them
 11) Backups: back up, delete or restore an organization or user (into Gitea or WeKan),
-    or update a backup straight from GitHub (no Gitea)
+    update a backup straight from GitHub (no Gitea), combine dated backups, old data,
+    migrate all Gitea to backups
  0) Quit""")
         c = ask("Choice")
         try:
@@ -2629,9 +2654,28 @@ def main():
     p.add_argument("--convert-only", nargs=2, metavar=("SRC", "DST"),
                    help="only convert a local .github/workflows (SRC) into DST, no Gitea")
     p.add_argument("--backup-from-github", metavar="NAME",
-                   help="a new backup of the GitHub organization or user NAME in backup_dir: the newest "
-                        "backup of it brought up to date straight from GitHub (only what is new or "
-                        "changed is downloaded), or a whole one - no Gitea - and exit")
+                   help="the one backup of the GitHub organization or user NAME in backup_dir, updated in "
+                        "place straight from GitHub (only what is new or changed is downloaded), or made - "
+                        "no Gitea - and exit")
+    p.add_argument("--combine-backups", nargs="?", const="all", metavar="NAME|all",
+                   help="combine the dated backups (YYYY-MM-DD_HH-MM-SS directories of older versions) of NAME, "
+                        "or of all, into the one backup, verify it and delete them - no Gitea, GitHub or token "
+                        "- and exit")
+    p.add_argument("--delete-partial", action="store_true",
+                   help="with --combine-backups: also delete .partial directories (backups that broke off)")
+    p.add_argument("--list-old-only", metavar="NAME",
+                   help="print what older backups of NAME had that its newest run did not see, and exit")
+    p.add_argument("--delete-old-only", metavar="NAME",
+                   help="delete from NAME's backup what its newest run did not see (asks NAME typed), and exit")
+    p.add_argument("--confirm", metavar="NAME", help="with --delete-old-only: NAME, instead of typing it")
+    p.add_argument("--migrate-all-gitea", action="store_true",
+                   help="move ALL of Gitea into backups: a repository at a time, smallest first, each deleted "
+                        "from Gitea once its backup is verified (asks to type a phrase and the Gitea address)")
+    p.add_argument("--continue-on-error", action="store_true",
+                   help="with --migrate-all-gitea: go on with the next repository when one fails")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --combine-backups, --delete-old-only and --migrate-all-gitea: only say what "
+                        "would be done")
     p.add_argument("--exclude", action="append", default=[], metavar="OWNER/NAME",
                    help="with --backup-from-github: leave this repository out, besides the Sources "
                         "excludes (again for more)")
@@ -2642,6 +2686,37 @@ def main():
     if a.prune_release_files:
         apply_config()
         sys.exit(0 if prune_release_files(a.prune_release_files) else 1)
+    if a.combine_backups:
+        names = None if a.combine_backups == "all" else [a.combine_backups]
+        results = gitea_backup.combine_all(backup_dir(), log, a.dry_run, a.delete_partial, names)
+        if not results:
+            log(f"No dated backups in {backup_dir()}: nothing to combine.")
+        sys.exit(1 if any("error" in r for r in results) else 0)
+    if a.list_old_only or a.delete_old_only:
+        try:
+            if a.list_old_only:
+                gitea_backup.old_only_report(os.path.join(backup_dir(), a.list_old_only), log, limit=10 ** 9)
+            else:
+                if a.confirm is None and not a.dry_run and not sys.stdin.isatty():
+                    p.error("--delete-old-only needs a terminal to type the name, or --confirm NAME")
+                gitea_backup.delete_old_only(backup_dir(), a.delete_old_only, log, ask, a.dry_run, a.confirm)
+        except gitea_backup.BackupError as e:
+            log(str(e))
+            sys.exit(1)
+        return
+    if a.migrate_all_gitea:
+        client = gitea_client()
+        if client is None:
+            p.error(f"--migrate-all-gitea needs the [gitea] url and an admin token in {INI_FILE}")
+        if not a.dry_run and not sys.stdin.isatty():
+            p.error("--migrate-all-gitea needs a terminal to type the confirmations (or --dry-run)")
+        try:
+            r = gitea_backup.migrate_all(client, backup_dir(), log, ask, a.dry_run, a.continue_on_error,
+                                         excludes(), gitea_data_dir())
+        except (gitea_backup.BackupError, gitea_attachments.AttachmentError) as e:
+            log(str(e))
+            sys.exit(1)
+        sys.exit(1 if r.get("failed") else 0)
     if a.backup_from_github:
         try:
             github_backup.update(github_client(), a.backup_from_github, backup_dir(), log, excludes() + a.exclude)

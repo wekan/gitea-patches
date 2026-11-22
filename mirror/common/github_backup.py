@@ -4,38 +4,40 @@ to date.
 
   update(gh, name, root, say, excludes)
 
-takes the newest whole backup of NAME under root that was made from GitHub and
-writes a NEW backup directory beside it (a new stamp, written as .partial and
-renamed when whole) with everything the old one had and what is new or changed on
-GitHub since. When there is none, it makes a whole one. The old backup is only read.
+updates NAME's one backup, <root>/<NAME>/<NAME>.db and .zip, IN PLACE with what is
+new or changed on GitHub (gitea_backup.updating: the lock, the dated backups of
+older versions combined first, the zip written again with the kept entries as they
+are, renamed into place when whole). When there is none, it makes a whole one; a
+backup made from Gitea is brought up to date the same way, its git reused.
 
-What is read again, and what is copied:
+What is read again, and what is kept:
 
   repositories   every one GitHub lists (new ones too); topics are in GitHub's JSON
   labels, milestones, collaborators, teams, members
                  listed again - they are small - and kept as GitHub has them now
   issues, pull requests, comments
-                 only those updated since the old backup was started (GitHub's
-                 `since`); the rest are copied from the old backup, rows and files
+                 only those updated since the last run from GitHub began (GitHub's
+                 `since`, meta github_updated); the rest are kept as they are, rows
+                 and files - and count as still at the source
   pull request details
                  only for new and changed pull requests
-  releases       listed again; a release file the old backup has with the same id,
-                 size and updated_at is copied from the old .zip - stored entries,
-                 copied as they are - and only the others are downloaded. A release
-                 GitHub no longer has is kept from the old backup.
+  releases       listed again; a release file the backup has with the same id,
+                 size and updated_at is kept as it is, and only the others are
+                 downloaded. A release GitHub no longer has is kept, as old data.
   files in text  github.com/user-attachments/..., github.com/<owner>/<repo>/files
                  and /assets, and user-images.githubusercontent.com links in issue and
                  comment bodies: downloaded into the issues/ and comments/ folders and
                  recorded in `files` with their SHA-256. A link that cannot be fetched
                  is reported, listed in meta missing_files, and tried again next time.
-  git, wiki      when GitHub's refs are the old bundle's, the old bundle is copied;
+  git, wiki      when GitHub's refs are the old bundle's, the old bundle is kept;
                  otherwise a mirror is seeded from the old bundle and fetched from
                  GitHub, so only the new objects are downloaded, and bundled again.
+  repositories   one GitHub no longer lists is kept, rows and files, as old data
 
 Rows keep GitHub's own JSON in `json` (close to Gitea's: issue.user.login, labels,
 milestone, state, created_at, pull_request; pulls head, base, merged,
 merge_commit_sha), and meta has source = github, github = the GitHub address and
-based_on = the stamp of the backup this one was brought up to date from. A file's
+github_updated = when the last run from GitHub began. A file's
 uuid is empty (GitHub's links are kept as they are in the text) and its json has
 browser_download_url, the link it was downloaded from. Nothing else differs from a
 backup made from Gitea, so gitea_backup.Backup, restore_gitea and wekan_zips read
@@ -54,12 +56,10 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 
 import gitea_attachments as ga
 import gitea_backup as gb
@@ -269,104 +269,21 @@ def _copy_out(src, out):
     return size, digest.hexdigest()
 
 
-def bundle_heads(zf, path):
-    """{ref: sha} from a git bundle's header in the zip - read without the pack."""
-    heads = {}
-    try:
-        with zf.open(path) as f:
-            if not f.readline().startswith(b"# v"):
-                return None
-            while True:
-                line = f.readline()
-                if not line or line == b"\n":
-                    return heads
-                if line[:1] in (b"@", b"-"):
-                    continue
-                sha, _, ref = line.decode(errors="replace").strip().partition(" ")
-                if ref.startswith("refs/"):
-                    heads[ref] = sha
-    except (KeyError, OSError, zipfile.BadZipFile):
-        return None
-
-
-def wanted_ref(ref):
-    return ref.startswith(("refs/heads/", "refs/tags/")) or re.fullmatch(r"refs/pull/\d+/head", ref) is not None
-
-
-def remote_heads(url, env):
-    """(ok, {ref: sha}) of the branches, tags and pull request heads at url."""
-    code, out = gb.git(["ls-remote", url], env=env)
-    if code != 0:
-        return False, out
-    heads = {}
-    for line in out.splitlines():
-        sha, _, ref = line.partition("\t")
-        if wanted_ref(ref) and not ref.endswith("^{}"):
-            heads[ref] = sha
-    return True, heads
-
-
-def stamp_dir(root, name):
-    stamp = datetime.datetime.now().strftime(gb.STAMP)
-    final, n = os.path.join(root, name, stamp), 1
-    while os.path.exists(final) or os.path.exists(final + ".partial"):
-        final = os.path.join(root, name, f"{stamp}-{n}")
-        n += 1
-    return final
-
-
-def github_base(root, name):
-    """(newest whole backup of name made from GitHub, newest of any kind) - directories."""
-    found = gb.backups(root, name)
-    base = None
-    for _, _, d in found:
-        try:
-            b = gb.Backup(d)
-        except (gb.BackupError, OSError, ValueError):
-            continue
-        try:
-            if b.meta.get("source") == "github" and b.meta.get("complete") == "yes":
-                base = d
-                break
-        finally:
-            b.close()
-    return base, (found[0][2] if found else None)
-
-
-class Stats:
-    KEYS = ("issues", "pulls", "comments", "releases")
-
-    def __init__(self):
-        self.new = dict.fromkeys(self.KEYS, 0)
-        self.changed = dict.fromkeys(self.KEYS, 0)
-        self.downloaded = [0, 0]  # files, bytes
-        self.copied = [0, 0]
-        self.git_fetched = 0
-        self.git_same = 0
-        self.missing = []
-
-    def add(self, other):
-        for k in self.KEYS:
-            self.new[k] += other.new[k]
-            self.changed[k] += other.changed[k]
-        for a, b in ((self.downloaded, other.downloaded), (self.copied, other.copied)):
-            a[0] += b[0]
-            a[1] += b[1]
-        self.git_fetched += other.git_fetched
-        self.git_same += other.git_same
-        self.missing += other.missing
-
-    def line(self):
-        parts = [f"{k} {self.new[k]} new, {self.changed[k]} changed" for k in self.KEYS]
-        return "; ".join(parts) + (f"; files {self.downloaded[0]} downloaded ({ga.human(self.downloaded[1])}), "
-                                   f"{self.copied[0]} copied ({ga.human(self.copied[1])})")
+bundle_heads = gb.bundle_heads
+wanted_ref = gb.wanted_ref
+remote_heads = gb.remote_heads
+Stats = gb.Stats
 
 
 # --- one backup being written -------------------------------------------------------------
 
 class _Update:
-    def __init__(self, gh, w, old, seed, since, say):
-        self.gh, self.w, self.old, self.seed, self.since, self.say = gh, w, old, seed, since, say
+    """One run from GitHub into w (a gitea_backup._Writer). old: the backup as it was
+    before this run (gitea_backup.Backup) or None; its rows are in w already, so a
+    row or file that is still at GitHub is only written again to mark it seen."""
+
+    def __init__(self, gh, w, old, since, say):
+        self.gh, self.w, self.old, self.since, self.say = gh, w, old, since, say
         self.retry = {}
         if old:
             for m in json.loads(old.meta.get("missing_files") or "[]"):
@@ -376,27 +293,22 @@ class _Update:
         return self.old.rows(f"SELECT * FROM {table} WHERE repo = ?", full) if self.old else []
 
     def copy_entry(self, zf, path, st):
-        """A zip entry of an old backup into the new one, as it is. Returns its path."""
+        """An entry the backup has, kept as it is. Returns its path."""
         info = zf.getinfo(path)
-
-        def fill(out):
-            with zf.open(info) as src:
-                shutil.copyfileobj(src, out, CHUNK)
-            return info.file_size, None
-        new, size, _ = self.w.add_stream(path, fill)
         st.copied[0] += 1
-        st.copied[1] += size
-        return new
+        st.copied[1] += info.file_size
+        return path
 
     def copy_file_row(self, row, st):
-        try:
-            path = self.copy_entry(self.old.zip, row["path"], st)
-        except KeyError:
-            self.say(f"    not in the old .zip: {row['path']}")
+        """A file the backup has, still at GitHub: kept as it is, seen now."""
+        if row["path"] not in self.w.old_names:
+            self.say(f"    not in the .zip: {row['path']}")
             return
-        self.w.row("files", **dict(row, path=path))
+        self.w.keep_file(row)
+        st.copied[0] += 1
+        st.copied[1] += row.get("size") or 0
 
-    def download(self, url, folder, repo, kind, parent, st, accept="*/*", name=None, asset=None):
+    def download(self, url, folder, repo, kind, parent, st, accept="*/*", name=None, asset=None, prev=None):
         """A file from GitHub into the zip and the files table; False when it could not be."""
         try:
             resp = self.gh.open_file(url, accept)
@@ -404,17 +316,22 @@ class _Update:
             self.say(f"    not saved: {url}: {e}")
             if asset is None:
                 st.missing.append({"repo": repo, "kind": kind, "parent": str(parent), "url": url})
+            elif prev:
+                self.w.keep_file(prev)  # still at GitHub: the old copy stays current
             return False
         try:
             with resp:
                 name = name or _name_of(resp, url)
                 fid = asset["id"] if asset else file_id(url)
                 target = folder + (safe(name) if asset else f"{fid}-{safe(name)}")
-                path, size, digest = self.w.add_stream(target, lambda out: _copy_out(resp, out))
+                path, size, digest, written = self.w.put_stream(target, lambda out: _copy_out(resp, out),
+                                                                (repo, kind, str(parent), fid), prev)
         except (OSError, urllib.error.URLError) as e:
             self.say(f"    not saved: {url}: {e}")
             if asset is None:
                 st.missing.append({"repo": repo, "kind": kind, "parent": str(parent), "url": url})
+            elif prev:
+                self.w.keep_file(prev)
             return False
         info = asset if asset else {"id": fid, "name": name, "browser_download_url": url,
                                     "content_type": resp.headers.get("Content-Type") or ""}
@@ -433,58 +350,13 @@ class _Update:
 
     # git -------------------------------------------------------------------------------
     def bundle(self, full, short, wiki, old_path, seed_path, default, st):
-        kind = "wiki" if wiki else "git"
         url = self.gh.git_url(full, wiki)
-        env = self.gh.git_env(url)
-        ok, heads = remote_heads(url, env)
-        if not ok or not heads:
-            if old_path:
-                if not ok:
-                    self.say(f"    {kind}: cannot read {url}; the old bundle is kept: {str(heads)[-200:]}")
-                return self.copy_entry(self.old.zip, old_path, st)
-            if not ok and not wiki:
-                self.say(f"    git: cannot read {url}: {str(heads)[-300:]}")
-            return None
-        if old_path:
-            had = bundle_heads(self.old.zip, old_path) or {}
-            if all(had.get(r) == s for r, s in heads.items()):
-                st.git_same += 1
-                self.say(f"    {kind}: unchanged")
-                return self.copy_entry(self.old.zip, old_path, st)
-        mirror = os.path.join(self.w.tmp, "mirror.git")
-        shutil.rmtree(mirror, ignore_errors=True)
-        gb.git(["init", "--quiet", "--bare", mirror])
-        src = (self.old.zip, old_path) if old_path else (self.seed.zip, seed_path) if seed_path else None
-        if src:
-            seed_file = os.path.join(self.w.tmp, "seed.bundle")
-            with src[0].open(src[1]) as f, open(seed_file, "wb") as out:
-                shutil.copyfileobj(f, out, CHUNK)
-            code, out = gb.git(["-C", mirror, "fetch", "--quiet", seed_file, "+refs/*:refs/*"])
-            os.remove(seed_file)
-            if code != 0:
-                self.say(f"    {kind}: the old bundle could not be read; fetching everything: {out[-200:]}")
-        code, out = gb.git(["-C", mirror, "fetch", "--quiet", "--no-tags", url, "+refs/heads/*:refs/heads/*",
-                            "+refs/tags/*:refs/tags/*", "+refs/pull/*/head:refs/pull/*/head"], env=env)
-        if code != 0:
-            shutil.rmtree(mirror, ignore_errors=True)
-            if old_path:
-                self.say(f"    {kind}: git fetch failed; the old bundle is kept: {out[-300:]}")
-                return self.copy_entry(self.old.zip, old_path, st)
-            raise GitHubError(f"{full}{' wiki' if wiki else ''}: git fetch failed: {out[-500:]}")
-        if default:
-            gb.git(["-C", mirror, "symbolic-ref", "HEAD", f"refs/heads/{default}"])
-        bundle = os.path.join(self.w.tmp, "repo.bundle")
-        code, out = gb.git(["-C", mirror, "bundle", "create", "--quiet", bundle, "--all"])
-        shutil.rmtree(mirror, ignore_errors=True)
-        if code != 0:
-            if "empty bundle" in out.lower() or "refusing to create empty bundle" in out.lower():
-                return None
-            raise GitHubError(f"{full}: git bundle failed: {out[-500:]}")
-        path, size, _ = self.w.add_file(f"{short}/{kind}.bundle", bundle)
-        os.remove(bundle)
-        st.git_fetched += 1
-        self.say(f"    {kind}: {ga.human(size)}{' (only new objects fetched)' if src else ''}")
-        return path
+        seed = (self.w.old_zip, seed_path) if seed_path and seed_path in self.w.old_names else None
+        try:
+            return gb.refresh_bundle(self.w, url, self.gh.git_env(url), old_path, f"{short}/{'wiki' if wiki else 'git'}.bundle",
+                                     self.say, st, wiki=wiki, default=default, seed=seed)
+        except gb.BackupError as e:
+            raise GitHubError(f"{full}{' wiki' if wiki else ''}: {e}")
 
     # one repository ----------------------------------------------------------------------
     def repo(self, repo, st):
@@ -495,8 +367,9 @@ class _Update:
         prev = prev[0] if prev else None
         since = self.since if prev else None
         seed_row = None
-        if not prev and self.seed:
-            seed_row = (self.seed.rows("SELECT * FROM repos WHERE lower(full_name) = lower(?)", full) or [None])[0]
+        if not prev and self.old:
+            # The same repository under another case of its name (a backup made from Gitea).
+            seed_row = (self.old.rows("SELECT * FROM repos WHERE lower(full_name) = lower(?)", full) or [None])[0]
         git_bundle = self.bundle(full, short, False, prev and prev["git_bundle"],
                                  seed_row and seed_row["git_bundle"], repo.get("default_branch"), st)
         if repo.get("has_wiki") or (prev and prev["wiki_bundle"]):
@@ -547,8 +420,11 @@ class _Update:
             elif not same:
                 st.changed[kind] += 1
             changed_issues[n] = i
+        listed = {i["number"] for i in fresh}
         for n, r in old_issues.items():
-            if n not in changed_issues:
+            # Unchanged since the last run: still at GitHub. Without `since` every one
+            # was listed, so one that was not is gone: it stays as old data.
+            if n not in changed_issues and (since or n in listed):
                 w.row("issues", **r)
                 if n in old_pulls:
                     w.row("pulls", **old_pulls[n])
@@ -582,15 +458,17 @@ class _Update:
             else:
                 st.changed["comments"] += 1
             changed_comments[c["id"]] = c
+        listed_c = {c["id"] for c in fresh_c}
         for cid, r in old_comments.items():
-            if cid not in changed_comments:
+            if cid not in changed_comments and (since or cid in listed_c):
                 w.row("comments", **r)
         for cid, c in changed_comments.items():
             w.row("comments", repo=full, id=cid, issue_number=gb.number_of(c), json=gb.dumps(c))
 
         # files of issues and comments: every old one is copied, the new links downloaded
         for (kind, parent), rows in old_files.items():
-            if kind in ("issues", "comments"):
+            still = since or (int(parent) in (listed if kind == "issues" else listed_c) if parent.isdigit() else False)
+            if kind in ("issues", "comments") and still:
                 for f in rows:
                     self.copy_file_row(f, st)
 
@@ -651,12 +529,8 @@ class _Update:
         except GitHubError as e:
             self.say(f"    releases: {e}; kept from the old backup")
             fresh = []
-        ids = {r["id"] for r in fresh}
-        for rid, r in old_rel.items():  # gone from GitHub: kept, with its files
-            if rid not in ids:
-                w.row("releases", **r)
-                for f in old_files.get(("releases", str(rid)), []):
-                    self.copy_file_row(f, st)
+        # A release GitHub no longer has stays in the backup, with its files: old data
+        # (seen is not renewed).
         todo = []
         for r in fresh:
             w.row("releases", repo=full, id=r["id"], tag=r.get("tag_name"), json=gb.dumps(r))
@@ -673,11 +547,11 @@ class _Update:
                         json.loads(f["json"] or "{}").get("updated_at") == a.get("updated_at"):
                     self.copy_file_row(dict(f, json=gb.dumps(a)), st)
                 else:
-                    todo.append((r, tag, a))
-        for r, tag, a in todo:
+                    todo.append((r, tag, a, f))
+        for r, tag, a, f in todo:
             self.download(a.get("url") or a.get("browser_download_url"), f"{short}/releases/{tag}/", full,
                           "releases", r["id"], st, accept="application/octet-stream",
-                          name=a.get("name") or str(a["id"]), asset=a)
+                          name=a.get("name") or str(a["id"]), asset=a, prev=f)
 
 
 PERMISSION = {"admin": "admin", "maintain": "admin", "write": "write", "triage": "read", "read": "read"}
@@ -705,10 +579,25 @@ def owner_repos(gh, login, kind):
     return sorted(repos, key=lambda r: r["full_name"].lower())
 
 
+def _since(meta):
+    """GitHub's `since` for a backup: ten minutes before the last run from GitHub
+    began (clocks differ, and an item changed while it was being written is read
+    again); None when it was never updated from GitHub."""
+    when = meta.get("github_updated") or (meta.get("updated") or meta.get("created") if meta.get("source") == "github"
+                                         else "")
+    if not when:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(when.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (t - datetime.timedelta(minutes=10)).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def update(gh, name, root, say, excludes=()):
-    """A new backup of the GitHub organization or user NAME under root: the newest one
-    made from GitHub, brought up to date - or a whole one, when there is none. Returns
-    the new backup's directory."""
+    """The one backup of the GitHub organization or user NAME under root, updated in
+    place from GitHub - or made, when there is none. Returns its directory
+    (root/NAME); update.stats is what was done."""
     name = ga.normalize_scope(name)
     if not name or "/" in name:
         raise gb.BackupError("A backup is of an organization or a user: give its name.")
@@ -722,88 +611,60 @@ def update(gh, name, root, say, excludes=()):
         s, org = gh.get(f"orgs/{login}")
         if s == 200 and isinstance(org, dict):
             info = org
-    base, newest = github_base(root, login)
-    old = gb.Backup(base) if base else None
-    seed = gb.Backup(newest) if newest and newest != base else None
-    started = datetime.datetime.now(datetime.timezone.utc)
-    since = None
-    if old:
-        try:
-            t = datetime.datetime.fromisoformat(old.meta["created"].replace("Z", "+00:00"))
-            # Ten minutes before the old one began: clocks differ, and an item changed
-            # while it was being written is read again.
-            since = (t - datetime.timedelta(minutes=10)).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        except (KeyError, ValueError):
-            since = None
-    try:
-        repos = owner_repos(gh, login, kind)
-        names, gone = ga.apply_excludes(login, [r["full_name"] for r in repos], excludes)
-        for n in gone:
-            say(f"  {n}: excluded; left out")
-        keep = set(names)
-        repos = [r for r in repos if r["full_name"] in keep]
-        final = stamp_dir(root, login)
-        partial = final + ".partial"
-        os.makedirs(partial)
-        if old:
-            say(f"Updating the backup of the GitHub {kind} {login} ({os.path.basename(base)}) from GitHub: "
-                f"{len(repos)} repositories, changes since {since} -> {final}")
+    repos = owner_repos(gh, login, kind)
+    names, gone = ga.apply_excludes(login, [r["full_name"] for r in repos], excludes)
+    for n in gone:
+        say(f"  {n}: excluded; left out")
+    keep = set(names)
+    repos = [r for r in repos if r["full_name"] in keep]
+    total = Stats()
+    with gb.updating(root, login, "github", say) as w:
+        old = w.previous()
+        since = _since(old.meta) if old else None
+        if old and since:
+            say(f"Updating the backup of the GitHub {kind} {login} from GitHub (run {w.run}): {len(repos)} "
+                f"repositories, changes since {since} -> {w.dir}")
+        elif old:
+            say(f"Updating the backup of {login} (made from Gitea: its git is reused) from GitHub (run {w.run}): "
+                f"{len(repos)} repositories -> {w.dir}")
         else:
-            say(f"Backing up the GitHub {kind} {login} from GitHub" +
-                (f" (the newest backup, {os.path.basename(newest)}, was made from Gitea: its git is reused)"
-                 if seed else "") + f": {len(repos)} repositories -> {final}")
+            say(f"Backing up the GitHub {kind} {login} from GitHub: {len(repos)} repositories -> {w.dir}")
         if not gh.token or gh.anonymous:
             say("  No GitHub token: public repositories only, 60 requests an hour.")
-        w = gb._Writer(partial, login)
-        u = _Update(gh, w, old, seed, since, say)
-        total = Stats()
-        try:
-            meta = {"format": str(gb.FORMAT), "created": started.isoformat(), "gitea": "", "source": "github",
-                    "github": gh.web, "owner": login, "kind": kind, "complete": "no",
-                    "based_on": os.path.basename(base) if base else ""}
-            for k, v in meta.items():
-                w.row("meta", key=k, value=v)
-            w.row("owner", name=login, kind=kind, json=gb.dumps(info))
-            _avatar(u, info, total)
-            if kind == "organization":
-                _org(u, login, total)
-            for n, repo in enumerate(repos, 1):
-                say(f"  [{n}/{len(repos)}] {repo['full_name']}")
-                st = Stats()
-                u.repo(repo, st)
-                say(f"    {st.line()}")
-                total.add(st)
-            if old:
-                listed = {r["full_name"] for r in repos} | set(gone)
-                gone_now = [r for r in old.rows("SELECT * FROM repos ORDER BY full_name")
-                            if r["full_name"] not in listed and r["full_name"].lower() not in {x.lower() for x in excludes}]
-                for r in gone_now:
-                    say(f"  {r['full_name']}: no longer on GitHub; kept from the old backup")
-                    _copy_repo(u, r, total)
-            w.row("meta", key="missing_files", value=json.dumps(total.missing))
-            w.row("meta", key="complete", value="yes")
-        finally:
-            w.close()
-        os.rename(partial, final)
-    finally:
+        u = _Update(gh, w, old, since, say)
+        w.meta_set(source="github", github=gh.web, owner=login, kind=kind, github_updated=w.started)
+        w.row("owner", name=login, kind=kind, json=gb.dumps(info))
+        _avatar(u, info, total)
+        if kind == "organization":
+            _org(u, login, total)
+        for n, repo in enumerate(repos, 1):
+            say(f"  [{n}/{len(repos)}] {repo['full_name']}")
+            st = Stats()
+            u.repo(repo, st)
+            say(f"    {st.line()}")
+            total.add(st)
         if old:
-            old.close()
-        if seed:
-            seed.close()
-    db, zp = os.path.join(final, f"{login}.db"), os.path.join(final, f"{login}.zip")
+            listed = {r["full_name"] for r in repos} | set(gone)
+            for r in old.rows("SELECT * FROM repos ORDER BY full_name"):
+                if r["full_name"] not in listed and r["full_name"].lower() not in {x.lower() for x in excludes}:
+                    say(f"  {r['full_name']}: no longer on GitHub; kept in the backup, as old data")
+        w.meta_set(missing_files=json.dumps(total.missing))
+        d, written = w.dir, list(w.added)
+    db, zp = os.path.join(d, f"{login}.db"), os.path.join(d, f"{login}.zip")
     say(f"Summary: {total.line()}; git {total.git_fetched} fetched, {total.git_same} unchanged; "
-        f"{gh.requests} requests to GitHub")
+        f"{gh.requests} requests to GitHub; zip: {written[0]} new entries ({ga.human(written[1])})")
     for m in total.missing:
         say(f"  not saved (tried again next time): {m['repo']} {m['kind']} {m['parent']}: {m['url']}")
     say(f"Backup ready: {db} ({ga.human(os.path.getsize(db))}), {zp} ({ga.human(os.path.getsize(zp))})")
     update.stats = total
-    return final
+    return d
 
 
 def _avatar(u, info, st):
     url = info.get("avatar_url")
     old = u.old.rows("SELECT * FROM files WHERE kind = 'avatar'") if u.old else []
-    if old and json.loads(u.old.rows("SELECT json FROM owner")[0]["json"] or "{}").get("avatar_url") == url:
+    owner = u.old.rows("SELECT json FROM owner") if u.old else []
+    if old and owner and json.loads(owner[0]["json"] or "{}").get("avatar_url") == url:
         u.copy_file_row(old[0], st)
         return
     if not url:
@@ -814,7 +675,8 @@ def _avatar(u, info, st):
         u.say(f"  avatar not saved: {e}")
         return
     with resp:
-        path, size, digest = u.w.add_stream("owner/avatar.png", lambda out: _copy_out(resp, out))
+        path, size, digest, _ = u.w.put_stream("owner/avatar.png", lambda out: _copy_out(resp, out),
+                                               ("", "avatar", "", 0), old[0] if old else None)
     u.w.row("files", path=path, repo="", kind="avatar", parent="", id=0, name="avatar.png", size=size,
             sha256=digest, uuid="", json=gb.dumps({"browser_download_url": url}))
     st.downloaded[0] += 1
@@ -843,18 +705,3 @@ def _org(u, login, st):
         except GitHubError:
             people, held = [], []
         w.row("teams", id=t["id"], name=t.get("name"), json=gb.dumps(t), members=gb.dumps(people), repos=gb.dumps(held))
-
-
-def _copy_repo(u, row, st):
-    """A repository of the old backup that GitHub no longer has: every row and file."""
-    full = row["full_name"]
-    paths = {}
-    for col in ("git_bundle", "wiki_bundle"):
-        if row[col]:
-            paths[col] = u.copy_entry(u.old.zip, row[col], st)
-    u.w.row("repos", **dict(row, **paths))
-    for table in ("labels", "milestones", "issues", "pulls", "comments", "releases"):
-        for r in u.old_rows(table, full):
-            u.w.row(table, **r)
-    for f in u.old_rows("files", full):
-        u.copy_file_row(f, st)

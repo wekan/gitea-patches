@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""A small backup (gitea_backup.py FORMAT 1) written without a Gitea: one
-organization "sample", repository sample/proj with an open issue that has a file,
-a comment, a merged pull request and a closed issue. Then its WeKan import .zip.
+"""A small backup (gitea_backup.py FORMAT 1, the one-backup layout <dir>/sample/
+sample.db and sample.zip) written without a Gitea: one organization "sample",
+repository sample/proj with an open issue that has a file, a comment, a merged pull
+request and a closed issue. Then its WeKan import .zip.
 
   python3 -I tests/lib/sample_backup.py <directory>   prints the WeKan .zip's path
 
@@ -20,12 +21,13 @@ FILE = b"sample attachment bytes\n" * 50
 
 
 def make(root):
-    d = os.path.join(root, "sample", "2026-01-01_00-00-00")
-    os.makedirs(d, exist_ok=True)
-    w = gb._Writer(d, "sample")
-    for k, v in {"format": "1", "created": "2026-01-01T00:00:00+00:00", "gitea": "http://gitea.invalid",
-                 "owner": "sample", "kind": "organization", "complete": "yes"}.items():
-        w.row("meta", key=k, value=v)
+    with gb.updating(root, "sample", "gitea", lambda m: None) as w:
+        _fill(w)
+    return os.path.join(root, "sample")
+
+
+def _fill(w):
+    w.meta_set(gitea="http://gitea.invalid", owner="sample", kind="organization")
     w.row("owner", name="sample", kind="organization", json=gb.dumps({"username": "sample"}))
     full = "sample/proj"
     w.row("repos", full_name=full, name="proj", json=gb.dumps({"full_name": full, "name": "proj",
@@ -47,8 +49,6 @@ def make(root):
     path, size, digest = w.add_stream("proj/issues/1/5-notes.txt", lambda out: (out.write(FILE), (len(FILE), ""))[1])
     w.row("files", path=path, repo=full, kind="issues", parent="1", id=5, name="notes.txt", size=size,
           sha256=digest, uuid="", json="{}")
-    w.close()
-    return d
 
 
 if __name__ == "__main__":
