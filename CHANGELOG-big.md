@@ -92,6 +92,19 @@ and the zips.
 **Mirroring** - the local Gitea on to GitLab and SourceForge.
 
 <details>
+<summary><a href="https://github.com/wekan/gitea-patches/commit/e994d45ca067704b3b7089407154187cc6262b2f">The users and organizations that take the most space in the local Gitea</a>. Thanks to xet7.</summary>
+
+Gitea's space menu (github-to-gitea's item 10, the mirror scripts' item after
+their own) has a third item: every repository of the Gitea the token can see,
+summed per user and organization - repositories, git, attachments, together
+and share - and the N largest, as many as asked. Release files are counted by
+default; `0` counts git sizes only, which Gitea knows without reading
+anything. Read-only; `tests/giteaAttachments.test.py` checks the sums, the
+order and that git-only reads no attachment list.
+
+</details>
+
+<details>
 <summary><a href="https://github.com/wekan/gitea-patches/commit/47fdc4ed21fd8f8b6462b4a195b079f0f12dd8c5">Gitea's attachments: space used, the largest repositories, and deleting them; excluded repositories</a>. Thanks to xet7.</summary>
 
 github-to-gitea, gitea-to-gitlab and gitea-to-sourceforge share a new menu
