@@ -345,6 +345,8 @@ COMMON_SETTINGS = [
     ("options", "include_forks", "yes", "mirror forks"),
     ("options", "include_archived", "yes", "mirror archived repositories"),
     ("options", "wiki", "yes", "mirror the wiki, where the target has a git wiki"),
+    ("options", "force_branches", "gitea-actions", "branches a tool regenerates (github-to-gitea's actions_branch), "
+                                                    "pushed with force; every other branch and tag is never forced"),
     ("options", "assets_max_mb", "-1", "largest release file to copy, in MB; -1 = no limit, 0 = no files"),
     ("options", "release_assets_keep", "newest", "releases synced, with their files, outside 'Releases kept in full': "
                                                  "newest | all | N (the N newest); older ones lose their files"),
@@ -670,9 +672,16 @@ class Engine:
             subprocess.run(["git", "clone", "--quiet", "--mirror", url, path], check=True, env=env)
         return path
 
+    def forced_branches(self):
+        """The setting force_branches: branch names, separated by commas or spaces."""
+        return [b for b in re.split(r"[,\s]+", self.cfg.get("force_branches")) if b]
+
     def push(self, path, dest_url, what):
-        """Branches and tags, never forced and never deleted. A rejected ref is reported;
-        the others still go."""
+        """Branches and tags, never forced and never deleted - except the branches of
+        force_branches, which a tool regenerates from scratch: github-to-gitea deletes
+        gitea-actions and makes it again on top of the newest main, so each version is
+        a non-fast-forward of the one before and the mirror would keep the first one
+        for ever. A rejected ref is reported; the others still go."""
         refs = subprocess.run(["git", "-C", path, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"],
                               capture_output=True, text=True, check=True).stdout.split()
         if not refs:
@@ -681,14 +690,24 @@ class Engine:
         cmd = ["git", "-C", path, "push", "--porcelain"]
         if self.dry:
             cmd.append("--dry-run")
-        r = subprocess.run(cmd + [dest_url, "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"],
-                           capture_output=True, text=True, env=self.t.git_env())
+        forced = [f"refs/heads/{b}" for b in self.forced_branches()]
+        # A negative refspec excludes its ref from every refspec of the push, so the
+        # branches of force_branches go in a push of their own, after the others.
+        r = subprocess.run(cmd + [dest_url, "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"]
+                           + [f"^{ref}" for ref in forced], capture_output=True, text=True, env=self.t.git_env())
+        forced = [ref for ref in forced if ref in refs]
+        if forced and r.returncode in (0, 1):
+            f = subprocess.run(cmd + [dest_url] + [f"+{ref}:{ref}" for ref in forced],
+                               capture_output=True, text=True, env=self.t.git_env())
+            r = subprocess.CompletedProcess(r.args, r.returncode or f.returncode,
+                                            r.stdout + f.stdout, r.stderr + f.stderr)
         changed = rejected = 0
         for line in r.stdout.splitlines():
             if line[:1] in ("*", "+", "-", " ") and "\t" in line:
                 changed += line[:1] != " "
                 if line[:1] in ("*", "+"):
-                    self.record("planned" if self.dry else "copied", f"{what} {line.split(chr(9))[1].split(':')[1]}")
+                    note = " (forced: in force_branches)" if line[:1] == "+" else ""
+                    self.record("planned" if self.dry else "copied", f"{what} {line.split(chr(9))[1].split(':')[1]}{note}")
             elif line[:1] == "!" and "\t" in line:
                 rejected += 1
                 ref = line.split("\t")[1].split(":")[1]

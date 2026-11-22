@@ -384,6 +384,38 @@ check("negative: a destination branch that moved its own way is not overwritten"
 check("... it is reported as failed", e.counts.get("failed") == 1)
 check("... and the new tag still goes", "refs/tags/v2" in git("-C", dest, "show-ref"))
 
+# A branch a tool regenerates (github-to-gitea deletes gitea-actions and makes it again on
+# top of the newest main) is a non-fast-forward each time: only force_branches lets it go.
+def regenerate_actions(message):
+    git("-C", work, "checkout", "-q", "-B", "gitea-actions", "main")
+    git("-C", work, "-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", message)
+    git("-C", work, "push", "-q", "-f", os.path.join(src_parent, "proj.git"), "gitea-actions")
+    git("-C", work, "checkout", "-q", "main")
+    return git("-C", work, "rev-parse", "gitea-actions")
+
+
+check("force_branches is gitea-actions by default", e.forced_branches() == ["gitea-actions"])
+regenerate_actions("actions 1")
+e.counts = {}
+e.sync_git(repo, {})
+second = regenerate_actions("actions 2")
+check("the regenerated branch is not a fast-forward of the first",
+      subprocess.run(["git", "-C", dest, "merge-base", "--is-ancestor", "gitea-actions", second],
+                     capture_output=True).returncode != 0)
+e.counts = {}
+e.sync_git(repo, {})
+check("a branch of force_branches is force-updated to its regenerated version",
+      git("-C", dest, "rev-parse", "gitea-actions") == second)
+check("negative: main, which moved its own way, is still not overwritten", git("-C", dest, "rev-parse", "main") == dest_main)
+check("... and is still the only failure", e.counts.get("failed") == 1)
+e.cfg.set("options", "force_branches", "")
+third = regenerate_actions("actions 3")
+e.counts = {}
+e.sync_git(repo, {})
+check("negative: with force_branches empty, the regenerated branch is not forced",
+      git("-C", dest, "rev-parse", "gitea-actions") == second and e.counts.get("failed") == 2)
+e.cfg.set("options", "force_branches", "gitea-actions")
+
 # --- SourceForge: tools, tickets, comments, files ------------------------------------------------
 class FakeSF(Fake):
     def __init__(self):

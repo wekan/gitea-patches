@@ -47,7 +47,7 @@ the menu's **Destinations** - by default the same name as its Gitea owner.
 
 | | GitLab | SourceForge |
 |---|---|---|
-| git branches and tags | pushed without force, never deleting | the same, to a Git tool of the project |
+| git branches and tags | pushed without force, never deleting - except `force_branches` | the same, to a Git tool of the project |
 | wiki | the project's git wiki | - (SourceForge's wiki is not git) |
 | issues, pull requests | issues; a PR is "[PR] ..." | tickets of a Tracker tool |
 | comments, labels, milestones, closed state | yes | comments, labels, closed state |
@@ -55,6 +55,12 @@ the menu's **Destinations** - by default the same name as its Gitea owner.
 | releases | releases, files in the generic package registry | `<files_dir>[/<repository>]/<tag>/` in the project's Files, notes as README.md |
 | private repositories | private projects (`private = no` skips them) | not mirrored: SourceForge projects are public |
 | avatars (step `avatars`) | organization or user -> GitLab group (or the token's own user); repository -> project avatar | not possible: SourceForge's API has no project icon; reported once per run |
+
+`force_branches` (default `gitea-actions`) names branches a tool makes again from
+scratch: github-to-gitea deletes `gitea-actions` and creates it on top of the newest
+`main`, so each version is a non-fast-forward of the one before. Only those are pushed
+with force, in a push of their own; every other branch and tag is still never forced.
+Empty it to force nothing.
 
 github-to-gitea mirrors release files by `release_assets` - `github` (the default:
 from GitHub), `local` (`assets_dir`) or `none`. By default only a repository's
